@@ -197,9 +197,19 @@ test('URL checks take linear time, so a crafted lockfile cannot stall the runner
         try { redactLockfile(JSON.stringify({ v: value }), 'package-lock.json'); } catch (e) { assert.ok(e instanceof RedactionError, e); }
         assert.ok(performance.now() - t0 < 1500, `${unit} x ${value.length}: ${performance.now() - t0} ms`);
     }
+    // One long run of scheme characters before a single ":" (each "." could start a scheme).
+    for (const value of ['a.'.repeat(250_000) + 'a:', 'a.'.repeat(250_000) + 'a:x@y', 'x-'.repeat(250_000) + 'https:h?q', 'a+'.repeat(250_000) + 'a://h@']) {
+        const t0 = performance.now();
+        parserFindsSecret(value);
+        try { redactLockfile(JSON.stringify({ v: value }), 'package-lock.json'); } catch (e) { assert.ok(e instanceof RedactionError, e); }
+        assert.ok(performance.now() - t0 < 1500, `${value.slice(-8)} x ${value.length}: ${performance.now() - t0} ms`);
+    }
+    assert.ok(parserFindsSecret('x-'.repeat(1000) + 'https:u:p@h'));
     // Too many URL starts in one value to parse each: refused, not slowly checked.
-    assert.ok(parserFindsSecret('https:h/ '.repeat(65)));
-    assert.ok(!parserFindsSecret('https:h/ '.repeat(64)));
+    assert.ok(parserFindsSecret(`${'https:h/ '.repeat(65)}@`));
+    assert.ok(!parserFindsSecret(`${'https:h/ '.repeat(64)}@`));
+    // Without an "@" or "?" no URL can hold user info or a query, so nothing needs parsing.
+    assert.ok(!parserFindsSecret('https:h/ '.repeat(65)));
 });
 
 test('ordinary public lockfiles keep their meaning', () => {

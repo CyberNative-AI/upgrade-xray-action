@@ -119,6 +119,7 @@ export function unsafeString(s) {
 }
 
 const SPECIAL_SCHEMES = new Set(['http', 'https', 'ws', 'wss', 'ftp', 'file']);
+const MAX_SPECIAL_LENGTH = Math.max(...[...SPECIAL_SCHEMES].map((x) => x.length));
 const MAX_URL_PARSES = 64; // per string; real lockfile values hold one or two URLs
 
 /**
@@ -132,11 +133,15 @@ const MAX_URL_PARSES = 64; // per string; real lockfile values hold one or two U
  */
 export function parserFindsSecret(s) {
     const w = s.replace(/[\t\n\r]/g, '');
+    // User info needs an "@" and a query a "?": a URL starting after the last of them has neither.
+    const last = Math.max(w.lastIndexOf('@'), w.lastIndexOf('?'));
     let parses = 0;
     for (const { start, colon } of schemes(w)) {
+        if (colon > last) break;
         for (let i = start; i < colon; i++) {
             if (i > start && !('+.-'.includes(w[i - 1]) && LETTER.test(w[i]))) continue;
-            const special = SPECIAL_SCHEMES.has(w.slice(i, colon).toLowerCase());
+            // Only short names can be special, so a long run of scheme characters is not copied.
+            const special = colon - i <= MAX_SPECIAL_LENGTH && SPECIAL_SCHEMES.has(w.slice(i, colon).toLowerCase());
             if (!special && !w.startsWith('//', colon + 1)) continue;
             if (++parses > MAX_URL_PARSES) return true;
             const rest = w.slice(i);
