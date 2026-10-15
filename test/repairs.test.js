@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { run } from '../src/main.js';
 import YAML from 'yaml';
 import { parse as parseToml } from 'smol-toml';
-import { redactLockfile, RedactionError } from '../src/lockfiles.js';
+import { redactLockfile, RedactionError, parserFindsSecret } from '../src/lockfiles.js';
 import { composeComment, COMMENT_LIMIT, MARKER } from '../src/markdown.js';
 import { fakeServer, stepEnv, captureStdout } from './fake.js';
 
@@ -155,6 +155,51 @@ test('lockfiles that do not parse, or that a cleaned URL would make ambiguous, a
         assert.equal(r.st.posts, 0, `${name} was sent`);
         assert.match(r.st.comments[0]?.body ?? r.stdout, new RegExp(`was not sent: it [^.]*${why.source}`));
     }
+});
+
+// URL spellings the Actor's parser (WHATWG URL) reads as credentialed URLs although they lack a
+// literal "://": a line break inside the scheme, one or no slash, backslashes. Refused, never sent.
+const NORM = 'deploy:SECRET@registry.example/p.tgz?sig=SIGNATURE';
+const lockWith = (name, url) => (name.endsWith('.json')
+    ? JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/pkg': { version: '1', resolved: url } } })
+    : name.endsWith('.yaml')
+        ? YAML.stringify({ lockfileVersion: '9.0', packages: { 'pkg@1': { resolution: { tarball: url } } } })
+        : `[[package]]\nname = "pkg"\nversion = "1"\n[package.source]\ntype = "legacy"\nurl = ${JSON.stringify(url)}\n`);
+
+test('URL spellings the Actor\'s URL parser accepts without "://" are refused, never sent, in every format', async () => {
+    const urls = [`https:\n//${NORM}`, `https\n://${NORM}`, `https:/${NORM}`, `https:${NORM}`, `HTTPS:\\\\${NORM}`,
+        `ht\ttps:/\r/${NORM}`, `ws:${NORM}`, `git+https:${NORM}`, `pkg@https:${NORM}`, 'https:registry.example/p.tgz?sig=SIGNATURE',
+        `https: //${NORM}`];
+    for (const url of urls) {
+        for (const name of ['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'uv.lock', 'poetry.lock']) {
+            const before = lockWith(name, url);
+            assert.throws(() => redactLockfile(before, name), RedactionError, `${name}: ${JSON.stringify(url)}`);
+            const r = await go(prWith(name, before, before.replace(/"1"|pkg@1/, (m) => m.replace('1', '2'))));
+            assert.equal(r.st.posts, 0, `${name} sent: ${JSON.stringify(url)}`);
+            for (const q of r.st.requests) for (const w of ['SECRET', 'SIGNATURE']) assert.ok(!(q.body ?? '').includes(w), `${w} left in a request`);
+            assert.match(r.st.comments[0]?.body ?? r.stdout, /was not sent: it has URLs whose user names, passwords or query strings could not be removed with certainty/);
+        }
+    }
+});
+
+test('the URL parser check keeps ordinary lockfile values that are not credentialed URLs', () => {
+    const fine = ['npm:@scope/p@^1.0.0', 'sha256:ab', 'file:../a@b', 'link:../x', 'workspace:*', 'github:o/r#abc',
+        'git+ssh://github.com/o/r.git#abc', 'Q: why? Because it is fast', 'https://registry.npmjs.org/@s/p/-/p-1.tgz#sha512',
+        'https://files.pythonhosted.org/packages/ab/x-1-py3-none-any.whl#sha256=ab'];
+    for (const v of fine) assert.ok(!parserFindsSecret(v), v);
+    for (const v of [`https:${NORM}`, `https:/\n/${NORM}`, 'https:h/x?sig=1', 'wss:u@h', `https: //${NORM}`]) assert.ok(parserFindsSecret(v), v);
+});
+
+test('URL checks take linear time, so a crafted lockfile cannot stall the runner', () => {
+    for (const unit of ['a.', 'ws:', 'a:', 'https:x/', 'https://h/', 'git+https://a.b/']) {
+        const value = unit.repeat(Math.ceil(500_000 / unit.length));
+        const t0 = performance.now();
+        try { redactLockfile(JSON.stringify({ v: value }), 'package-lock.json'); } catch (e) { assert.ok(e instanceof RedactionError, e); }
+        assert.ok(performance.now() - t0 < 1500, `${unit} x ${value.length}: ${performance.now() - t0} ms`);
+    }
+    // Too many URL starts in one value to parse each: refused, not slowly checked.
+    assert.ok(parserFindsSecret('https:h/ '.repeat(65)));
+    assert.ok(!parserFindsSecret('https:h/ '.repeat(64)));
 });
 
 test('ordinary public lockfiles keep their meaning', () => {
