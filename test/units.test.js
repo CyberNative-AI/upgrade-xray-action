@@ -72,3 +72,38 @@ test('neutralizeMentions and worstVerdict', () => {
     assert.equal(worstVerdict(['clean', 'error', 'notice']), 'notice');
     assert.equal(worstVerdict([]), 'skipped');
 });
+
+test('pickLockfiles: pip requirements files as Dependabot and Renovate name them', () => {
+    const names = ['requirements.txt', 'api/requirements-dev.txt', 'requirements_test.txt', 'requirements/base.txt', 'svc/requirements/prod.txt',
+        'notes.txt', 'docs/requirements.md', 'requirements.in', 'my-requirements.txt'];
+    const { checks } = pickLockfiles(names.map((filename) => ({ filename, status: 'modified' })), { max: 20 });
+    assert.deepEqual(checks.map((c) => c.path), names.slice(0, 5));
+});
+
+test('redactLockfile: requirements files lose comments and credentials; pins, hashes and hosts stay', () => {
+    const text = [
+        '# token for the mirror: s3cr3t-comment',
+        '-i https://build:s3cr3t-idx@pypi.corp.example/simple?token=s3cr3t-q',
+        '--extra-index-url=https://__token__:s3cr3t-extra@pkgs.example/simple',
+        'Django==6.1.2 \\',
+        '    --hash=sha256:aaaa \\',
+        '    --hash=sha256:bbbb  # pinned',
+        'corp-lib @ https://dl:s3cr3t-url@files.corp.example/corp_lib-1.0.whl?sig=s3cr3t-sig',
+        '-e git+https://s3cr3t-git@github.com/o/r.git@v1#egg=editable-lib',
+        'uvicorn[standard]>=0.30 ; python_version >= "3.10"',
+        '',
+    ].join('\r\n');
+    const out = redactLockfile(text, 'requirements.txt');
+    for (const s of ['s3cr3t', 'token=', 'sig=', '#', '\r']) assert.ok(!out.replace('#egg=', '').includes(s), `${s} left in:\n${out}`);
+    assert.equal(out, [
+        '-i https://pypi.corp.example/simple',
+        '--extra-index-url=https://pkgs.example/simple',
+        'Django==6.1.2      --hash=sha256:aaaa      --hash=sha256:bbbb',
+        'corp-lib @ https://files.corp.example/corp_lib-1.0.whl',
+        '-e git+https://github.com/o/r.git@v1#egg=editable-lib',
+        'uvicorn[standard]>=0.30 ; python_version >= "3.10"',
+        '',
+    ].join('\n'));
+    assert.throws(() => redactLockfile('django==1\n//deploy:SECRET@h/x\n', 'requirements.txt'), /not a requirement/);
+    assert.throws(() => redactLockfile('django==1\npkg @ https://h/a\\SECRET\n', 'requirements.txt'), /could not be removed with certainty/);
+});

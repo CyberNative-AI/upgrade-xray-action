@@ -3,11 +3,16 @@ import YAML from 'yaml';
 import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
 import { code } from './markdown.js';
 
+const basename = (p) => p.slice(p.lastIndexOf('/') + 1);
+
 export const LOCKFILE_NAMES = new Set(['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'uv.lock', 'poetry.lock']);
+// pip requirements files as Dependabot and Renovate update them: requirements.txt,
+// requirements-dev.txt, requirements_test.txt, requirements/base.txt.
+const REQUIREMENTS_NAME = /^requirements(?:[-_.][\w.-]+)?\.txt$/i;
+export const isLockfilePath = (p) => LOCKFILE_NAMES.has(basename(p)) || REQUIREMENTS_NAME.test(basename(p)) || /(^|\/)requirements\/[^/]+\.txt$/i.test(p);
 export const MAX_LOCKFILE_BYTES = 20 * 1024 * 1024; // the Actor's own input limit
 const MAX_LISTED = 10;
 
-const basename = (p) => p.slice(p.lastIndexOf('/') + 1);
 
 /**
  * Changed lockfiles from a pull request's file list ({filename, status, previous_filename}).
@@ -15,11 +20,11 @@ const basename = (p) => p.slice(p.lastIndexOf('/') + 1);
  */
 export function pickLockfiles(files, { only = [], max = 3 } = {}) {
     const notes = [];
-    const wanted = (f) => (only.length ? only.includes(f.filename) : LOCKFILE_NAMES.has(basename(f.filename)));
+    const wanted = (f) => (only.length ? only.includes(f.filename) : isLockfilePath(f.filename));
     const checks = [];
     for (const f of files) {
         if (!wanted(f)) continue;
-        if (only.length && !LOCKFILE_NAMES.has(basename(f.filename))) { notes.push(`${code(f.filename)} is not a supported lockfile name; skipped.`); continue; }
+        if (only.length && !isLockfilePath(f.filename)) { notes.push(`${code(f.filename)} is not a supported lockfile name; skipped.`); continue; }
         if (f.status === 'added') { notes.push(`${code(f.filename)} is new in this pull request; there is no earlier version to compare.`); continue; }
         if (f.status === 'removed') continue;
         checks.push({ path: f.filename, beforePath: f.status === 'renamed' && f.previous_filename ? f.previous_filename : f.filename });
@@ -42,14 +47,40 @@ const FORMATS = {
     // A YAML stream may hold several documents (pnpm 11 and later write two); each is kept.
     yaml: { label: 'YAML', parse: yamlDocuments, stringify: (docs) => docs.map((d) => `---\n${YAML.stringify(d, { lineWidth: 0 })}`).join('') },
     toml: { label: 'TOML', parse: (t) => parseToml(t), stringify: (d) => stringifyToml(d) },
+    // pip requirements: the Actor's logical lines (comments removed, continuations joined), one per line.
+    lines: { label: 'requirements file', invalid: 'it has a line that is not a requirement, an option or a comment', parse: requirementFile, stringify: (lines) => lines.map((l) => `${l}\n`).join('') },
 };
+// The Actor's requirements grammar. A line outside it is never sent: the Actor would refuse the
+// file anyway, and a line this check cannot read could hold a split or unusual credential.
+const REQ_OPTION = /^(-[a-zA-Z]|--[a-z][a-z-]*)(?=[\s=]|$)/;
+const REQ_OP = String.raw`(?:===?|~=|!=|<=?|>=?)\s*[^\s;,]+`;
+const REQ_LINE = new RegExp(String.raw`^[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[^\]]*\])?\s*(?:${REQ_OP}(?:\s*,\s*${REQ_OP})*|@\s*\S+)?\s*(?:;[^-]*(?:-(?!-hash)[^-]*)*)?(?:\s*--hash[=\s]\S+)*\s*$`);
+function requirementFile(text) {
+    const lines = requirementLines(text);
+    if (!lines.every((l) => REQ_OPTION.test(l) || REQ_LINE.test(l))) throw new Error('not a requirements line');
+    return lines;
+}
+// Same as the Actor's requirementLines.
+function requirementLines(text) {
+    const out = [];
+    let cur = '';
+    for (const raw of text.split(/\r?\n/)) {
+        const line = raw.replace(/(^|\s)#.*$/, '');
+        if (/\\\s*$/.test(line)) { cur += line.replace(/\\\s*$/, ' '); continue; }
+        cur += line;
+        if (cur.trim()) out.push(cur.trim());
+        cur = '';
+    }
+    if (cur.trim()) out.push(cur.trim());
+    return out;
+}
 function yamlDocuments(text) {
     const docs = YAML.parseAllDocuments(text);
     if (!Array.isArray(docs)) return [];
     for (const d of docs) if (d.errors.length) throw d.errors[0];
     return docs.map((d) => d.toJS({ maxAliasCount: 10000 }));
 }
-const formatOf = (name) => FORMATS[name.endsWith('.json') ? 'json' : name.endsWith('.yaml') ? 'yaml' : 'toml'];
+const formatOf = (name) => FORMATS[name.endsWith('.json') ? 'json' : name.endsWith('.yaml') ? 'yaml' : name.endsWith('.txt') ? 'lines' : 'toml'];
 
 const SCHEME_CHAR = /[a-z0-9+.-]/i;
 const LETTER = /[a-z]/i;
@@ -219,7 +250,7 @@ export function unsafeUrls(text) {
 export function redactLockfile(text, name) {
     const fmt = formatOf(name);
     let doc;
-    try { doc = fmt.parse(text); } catch { throw new RedactionError(`it is not valid ${fmt.label}`); }
+    try { doc = fmt.parse(text); } catch { throw new RedactionError(fmt.invalid || `it is not valid ${fmt.label}`); }
     const out = fmt.stringify(mapStrings(doc, cleanString));
     let check;
     try { check = fmt.parse(out); } catch { throw new RedactionError(`it could not be re-serialized as valid ${fmt.label}`); }

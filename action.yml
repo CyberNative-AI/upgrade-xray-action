@@ -16,7 +16,7 @@ inputs:
     description: 'Package mode instead of lockfile mode: one update per line, e.g. "npm:axios@1.7.9..1.8.0" or "pypi:requests@2.31.0..2.32.0". Charged per package analysed.'
     default: ''
   lockfiles:
-    description: 'Only check these lockfile paths (one per line). Default: every changed package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, uv.lock and poetry.lock.'
+    description: 'Only check these lockfile paths (one per line). Default: every changed package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, uv.lock, poetry.lock and pip requirements file (requirements*.txt, requirements/*.txt).'
     default: ''
   max-lockfiles:
     description: 'At most this many changed lockfiles are checked per run (each one is a lockfile report).'

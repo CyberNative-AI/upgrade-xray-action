@@ -164,20 +164,24 @@ const lockWith = (name, url) => (name.endsWith('.json')
     ? JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/pkg': { version: '1', resolved: url } } })
     : name.endsWith('.yaml')
         ? YAML.stringify({ lockfileVersion: '9.0', packages: { 'pkg@1': { resolution: { tarball: url } } } })
-        : `[[package]]\nname = "pkg"\nversion = "1"\n[package.source]\ntype = "legacy"\nurl = ${JSON.stringify(url)}\n`);
+        : name.endsWith('.txt')
+            ? `-i ${url}\npkg==1\n`
+            : `[[package]]\nname = "pkg"\nversion = "1"\n[package.source]\ntype = "legacy"\nurl = ${JSON.stringify(url)}\n`);
 
 test('URL spellings the Actor\'s URL parser accepts without "://" are refused, never sent, in every format', async () => {
     const urls = [`https:\n//${NORM}`, `https\n://${NORM}`, `https:/${NORM}`, `https:${NORM}`, `HTTPS:\\\\${NORM}`,
         `ht\ttps:/\r/${NORM}`, `ws:${NORM}`, `git+https:${NORM}`, `pkg@https:${NORM}`, 'https:registry.example/p.tgz?sig=SIGNATURE',
         `https: //${NORM}`];
     for (const url of urls) {
-        for (const name of ['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'uv.lock', 'poetry.lock']) {
+        for (const name of ['package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'uv.lock', 'poetry.lock', 'requirements.txt']) {
             const before = lockWith(name, url);
             assert.throws(() => redactLockfile(before, name), RedactionError, `${name}: ${JSON.stringify(url)}`);
-            const r = await go(prWith(name, before, before.replace(/"1"|pkg@1/, (m) => m.replace('1', '2'))));
+            const r = await go(prWith(name, before, before.replace(/"1"|pkg@1|pkg==1/, (m) => m.replace('1', '2'))));
             assert.equal(r.st.posts, 0, `${name} sent: ${JSON.stringify(url)}`);
             for (const q of r.st.requests) for (const w of ['SECRET', 'SIGNATURE']) assert.ok(!(q.body ?? '').includes(w), `${w} left in a request`);
-            assert.match(r.st.comments[0]?.body ?? r.stdout, /was not sent: it has URLs whose user names, passwords or query strings could not be removed with certainty/);
+            assert.match(r.st.comments[0]?.body ?? r.stdout, name.endsWith('.txt')
+                ? /was not sent: it (has URLs whose user names, passwords or query strings could not be removed with certainty|has a line that is not a requirement, an option or a comment)/
+                : /was not sent: it has URLs whose user names, passwords or query strings could not be removed with certainty/);
         }
     }
 });
