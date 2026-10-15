@@ -1,0 +1,229 @@
+// Credential removal per lockfile format, paid-run cleanup, comment size, mentions and comment owner,
+// each checked on what is actually sent to Apify or posted to GitHub.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { run } from '../src/main.js';
+import { redactLockfile, RedactionError } from '../src/lockfiles.js';
+import { composeComment, COMMENT_LIMIT, MARKER } from '../src/markdown.js';
+import { fakeServer, stepEnv, captureStdout } from './fake.js';
+
+async function go(cfg, inputs, opts) {
+    const srv = await fakeServer(cfg);
+    const step = stepEnv(srv.base, inputs, opts);
+    const out = captureStdout();
+    try {
+        const code = await run(step.env, out.stream);
+        return { code, st: srv.st, stdout: out.text(), outputs: step.outputs(), summary: step.summary() };
+    } finally { await srv.close(); }
+}
+
+const prWith = (path, before, after, extra = {}) => ({
+    prFiles: [{ filename: path, status: 'modified' }],
+    files: { [`acme/app@BASESHA:${path}`]: before, [`acme/app@HEADSHA:${path}`]: after },
+    ...extra,
+});
+const startOf = (st) => st.requests.find((q) => q.method === 'POST' && q.path.startsWith('/v2/acts/'));
+// No @ in a comment may be followed by anything but the zero-width space, and no entity may spell one.
+const mentionable = (md) => [...(md.match(/@(?!​)/g) || []), ...(md.match(/&(#0*64|#x0*40|commat)/gi) || [])];
+
+// Each fixture spells the URL separators with that format's escapes; the secret words stay literal,
+// so their absence from the transmitted bytes proves they were removed.
+const SECRETS = ['SECRET', 'SIGNATURE', 'PASSWORD'];
+const FORMATS = {
+    'package-lock.json': {
+        before: String.raw`{"lockfileVersion":3,"packages":{"node_modules/pkg":{"version":"1","resolved":"https:\/\/deploy:SECRET@registry.example\/pkg.tgz?sig=SIGNATURE"},"node_modules/two":{"version":"1","resolved":"https://me:PASS@WORD@registry.example/two.tgz?sig=SIGNATURE"},"node_modules/pub":{"version":"1","resolved":"https://registry.npmjs.org/@scope/pub/-/pub-1.tgz"}}}`,
+        kept: ['https://registry.example/pkg.tgz', 'https://registry.example/two.tgz', 'https://registry.npmjs.org/@scope/pub/-/pub-1.tgz'],
+    },
+    'pnpm-lock.yaml': {
+        before: [
+            "lockfileVersion: '9.0'",
+            'packages:',
+            '  pkg@1:',
+            '    resolution: {tarball: "https:\\/\\/deploy:SECRET\\x40npm.corp.example/pkg.tgz?sig=SIGNATURE"}',
+            '  two@1:',
+            '    resolution: {tarball: https://me:PASS@WORD@npm.corp.example/two.tgz?X-Sig=SIGNATURE}',
+            '  three@1:',
+            "    resolution: {tarball: 'https://deploy:SECRET@npm.corp.example/three.tgz'}",
+            '',
+        ].join('\n'),
+        kept: ['https://npm.corp.example/pkg.tgz', 'https://npm.corp.example/two.tgz', 'https://npm.corp.example/three.tgz'],
+    },
+    'uv.lock': {
+        before: [
+            'version = 1',
+            '[[package]]',
+            'name = "pkg"',
+            'version = "1"',
+            'source = { registry = "https://__token__:SECRET\\u0040pypi.corp.example/simple" }',
+            'sdist = { url = "https://__token__:PASS\\U00000040WORD@pypi.corp.example/pkg-1.tar.gz?Signature=SIGNATURE#sha256=abc" }',
+            '',
+        ].join('\n'),
+        kept: ['https://pypi.corp.example/simple', 'https://pypi.corp.example/pkg-1.tar.gz#sha256=abc'],
+    },
+    'poetry.lock': {
+        before: [
+            '[[package]]',
+            'name = "pkg"',
+            'version = "1"',
+            '[package.source]',
+            'type = "legacy"',
+            'url = "https://deploy:PASS@WORD@pypi.corp.example/simple?token=SIGNATURE"',
+            'reference = "corp"',
+            '',
+        ].join('\n'),
+        kept: ['https://pypi.corp.example/simple"'],
+    },
+};
+
+for (const [name, f] of Object.entries(FORMATS)) {
+    test(`${name}: escaped and many-@ credentials never reach Apify, hosts and paths do`, async () => {
+        const after = f.before.replace(/version = "1"|"version":"1"|@1:/g, (m) => m.replace('1', '2'));
+        const r = await go(prWith(`app/${name}`, f.before, after));
+        const start = startOf(r.st);
+        assert.ok(start, 'the lockfile was sent');
+        for (const s of SECRETS) assert.ok(!start.body.includes(s), `${s} in the start request body`);
+        const input = JSON.parse(start.body);
+        for (const k of ['lockfileBefore', 'lockfileAfter']) for (const u of f.kept) assert.ok(input[k].includes(u), `${k} keeps ${u}`);
+        if (name.endsWith('.json')) assert.equal(JSON.parse(input.lockfileAfter).packages['node_modules/pkg'].version, '2');
+    });
+}
+
+test('lockfiles whose URLs cannot be cleaned with certainty are not sent, and the comment says so', async () => {
+    const cases = {
+        'pnpm-lock.yaml': '    resolution: {tarball: "https://deploy:SEC\\"RET@npm.corp.example/x.tgz"}\n',
+        'uv.lock': 'sdist = { url = """https://deploy:SECRET\\\n@pypi.corp.example/x.tar.gz""" }\n',
+        'poetry.lock': "url = 'https://deploy:SEC''RET@pypi.corp.example/simple'\n",
+        'package-lock.json': JSON.stringify({ packages: { 'node_modules/x': { resolved: 'https:\\/\\/deploy:SECRET@registry.example/x.tgz' } } }),
+    };
+    for (const [name, line] of Object.entries(cases)) {
+        assert.throws(() => redactLockfile(line, name), RedactionError, name);
+        const r = await go(prWith(`app/${name}`, line, `${line}\n`));
+        assert.equal(r.st.posts, 0, `${name} was sent`);
+        assert.match(r.st.comments[0]?.body ?? r.stdout, /was not sent: it has URLs whose user names, passwords or query strings could not be removed with certainty/);
+    }
+    assert.throws(() => redactLockfile('{not json', 'package-lock.json'), /not valid JSON/);
+});
+
+test('ordinary public lockfile lines pass unchanged in meaning', () => {
+    const yaml = "lockfileVersion: '9.0'\npackages:\n  '@scope/a@https://codeload.github.com/o/r/tar.gz/abc':\n    resolution: {tarball: https://codeload.github.com/o/r/tar.gz/abc}\n  b@1.0.0:\n    resolution: {integrity: sha512-AA==}\n";
+    assert.equal(redactLockfile(yaml, 'pnpm-lock.yaml'), yaml);
+    const toml = 'source = { registry = "https://pypi.org/simple" }\nwheels = [{ url = "https://files.pythonhosted.org/x-1-py3-none-any.whl", hash = "sha256:ab" }]\n';
+    assert.equal(redactLockfile(toml, 'uv.lock'), toml);
+});
+
+test('start request carries Apify\'s own timeout for the requested duration', async () => {
+    const r = await go(prWith('package-lock.json', '{"a":1}', '{"a":2}'), { 'INPUT_TIMEOUT-MINUTES': '7' });
+    assert.equal(startOf(r.st).query.timeout, '420');
+    assert.equal(startOf(r.st).query.maxTotalChargeUsd, '1');
+});
+
+test('poll failure: the known run is stopped, its ID and link are reported, not "could not be started"', async () => {
+    const r = await go(prWith('package-lock.json', '{"a":1}', '{"a":2}', { pollsUntilDone: 2, pollStatus: 403 }));
+    assert.equal(r.st.posts, 1);
+    assert.equal(r.st.aborts, 1);
+    assert.equal(r.outputs['run-ids'], 'RUN1');
+    assert.equal(r.outputs.verdict, 'error');
+    const body = r.st.comments[0].body;
+    assert.match(body, /lost contact with the run .*poll denied.* while its status was `RUNNING`\. A stop request was sent; Apify reports status `ABORTING`\. \[Run RUN1\]/);
+    assert.doesNotMatch(body, /could not be started|TIMED-OUT/);
+});
+
+test('timeout with a denied stop: reported as possibly still running, never as a finished TIMED-OUT', async () => {
+    const r = await go(prWith('package-lock.json', '{"a":1}', '{"a":2}', { pollsUntilDone: 1e9, abortStatus: 403 }), { 'INPUT_TIMEOUT-MINUTES': '0.0002', UPGRADE_XRAY_POLL_MS: '5' });
+    assert.equal(r.st.aborts, 1, 'a 403 refusal is final');
+    assert.equal(r.outputs['run-ids'], 'RUN1');
+    const body = r.st.comments[0].body;
+    assert.match(body, /did not finish within 1 minute\(s\) \(last status `RUNNING`\)\. The stop request failed \(.*abort denied.*\), so the run may still be running; Apify ends it after 1 minute\(s\) at most\. \[Run RUN1\]/);
+    assert.doesNotMatch(body, /TIMED-OUT/);
+});
+
+test('lost start response: the paid start is not retried and the unknown state is reported', async () => {
+    const r = await go(prWith('package-lock.json', '{"a":1}', '{"a":2}', { startDrop: true }));
+    assert.equal(r.st.posts, 1);
+    assert.equal(r.outputs.verdict, 'error');
+    assert.match(r.st.comments[0].body, /the start request failed .*network error.*, so it is not known whether a run started\. It was not retried\. .*ends after 10 minute\(s\) at most/);
+});
+
+test('a refused start (4xx) says no run was started', async () => {
+    const r = await go(prWith('package-lock.json', '{"a":1}', '{"a":2}', { startStatus: 403 }));
+    assert.equal(r.st.posts, 1);
+    assert.match(r.st.comments[0].body, /Apify did not start the run .*boom.*\. Nothing was charged for it\./);
+});
+
+test('a finished run whose report cannot be read keeps its ID and link', async () => {
+    const r = await go(prWith('package-lock.json', '{"a":1}', '{"a":2}', { readStatus: 403 }));
+    assert.equal(r.outputs['run-ids'], 'RUN1');
+    assert.match(r.st.comments[0].body, /the run finished, but its report could not be read .*record denied.*\[Run RUN1\]/);
+});
+
+test('the complete comment stays within the limit with thousands of file notes and many details blocks', async () => {
+    // A review probe: one note listing 2,997 long file names.
+    const notes = [`not checked ${Array.from({ length: 2997 }, (_, i) => `\`${'d'.repeat(100)}/${i}/package-lock.json\``).join(', ')}`];
+    const probe = composeComment([{ title: '', markdown: 'REVIEW' }], { notes, actor: 'cybernative-ai~upgrade-xray' });
+    assert.ok(probe.length <= COMMENT_LIMIT, `${probe.length}`);
+    assert.match(probe, /REVIEW/);
+
+    // Through the Action: 3,000 changed lockfiles (GitHub's file-list limit), long names, a report of
+    // many details blocks full of @-scopes (each one grows by the zero-width space).
+    const prFiles = Array.from({ length: 3000 }, (_, i) => ({ filename: `${'p'.repeat(180)}/${i}/package-lock.json`, status: i % 2 ? 'added' : 'modified' }));
+    const block = `<details><summary>@s/p</summary>\n\n${'- @scope/pkg @x/y @z/w 1.0.0 → 1.0.1\n'.repeat(40)}\n</details>\n`;
+    const report = `## Upgrade X-Ray\n\n${block.repeat(400)}`;
+    const files = { [`acme/app@BASESHA:${prFiles[0].filename}`]: '{"a":1}', [`acme/app@HEADSHA:${prFiles[0].filename}`]: '{"a":2}' };
+    const r = await go({ prFiles, files, report }, { 'INPUT_MAX-LOCKFILES': '1' });
+    const body = r.st.comments[0].body;
+    assert.ok(body.length <= COMMENT_LIMIT, `comment is ${body.length} chars`);
+    assert.equal((body.match(/<details>/g) || []).length, (body.match(/<\/details>/g) || []).length);
+    assert.match(body, /report shortened here/);
+    assert.match(body, /more note\(s\) in the job summary|and \d+ more/);
+    assert.deepEqual(mentionable(body), []);
+    assert.ok(r.summary.length > 1_000_000, 'job summary keeps the full report');
+});
+
+test('mentions: unmatched backticks, entities and escapes in a report or file name never leave an @ open', async () => {
+    const report = [
+        'Could not analyse: malformed archive `@victim',
+        '``@a`` ` @b `@c` \\`@d` &#64;e &#x40;f &commat;g &#064h @<!-- -->i [x](y`) @j',
+        '<details><summary>@k/l</summary>\n\n```\n@m\n```\n</details>',
+    ].join('\n\n');
+    const path = 'x`@n/`/package-lock.json';
+    const r = await go({ ...prWith(path, '{"a":1}', '{"a":2}'), prFiles: [{ filename: path, status: 'modified' }, { filename: 'q`@o/uv.lock', status: 'added' }], report });
+    const body = r.st.comments[0].body;
+    assert.deepEqual(mentionable(body), [], body);
+    assert.deepEqual(mentionable(r.summary), []);
+    assert.match(body, /malformed archive `@​victim/);
+});
+
+test('comment owner unknown: a new comment is posted and every existing comment is left unchanged', async () => {
+    const comments = [
+        { id: 7, user: { login: 'github-actions[bot]' }, body: `${MARKER}\nowned by another integration` },
+        { id: 8, user: { login: 'other-app[bot]' }, body: `${MARKER}\nalso not ours` },
+    ];
+    const r = await go(prWith('package-lock.json', '{"a":1}', '{"a":2}', { comments, viewerLogin: null, postAs: 'custom-app[bot]' }));
+    assert.equal(r.st.requests.filter((q) => q.method === 'PATCH').length, 0);
+    assert.equal(r.st.comments.length, 3);
+    assert.equal(r.st.comments[0].body, `${MARKER}\nowned by another integration`);
+    assert.equal(r.st.comments[1].body, `${MARKER}\nalso not ours`);
+    assert.match(r.st.comments[2].body, /REVIEW BEFORE MERGE/);
+    assert.match(r.stdout, /could not be determined, so a new comment was posted/);
+});
+
+test('an installation token is identified through GraphQL and updates only its own comment', async () => {
+    const comments = [
+        { id: 7, user: { login: 'github-actions[bot]' }, body: `${MARKER}\nnot ours` },
+        { id: 8, user: { login: 'custom-app[bot]' }, body: `${MARKER}\nours` },
+    ];
+    const r = await go(prWith('package-lock.json', '{"a":1}', '{"a":2}', { comments, viewerLogin: 'custom-app[bot]' }));
+    const patches = r.st.requests.filter((q) => q.method === 'PATCH');
+    assert.deepEqual(patches.map((q) => q.path), ['/repos/acme/app/issues/comments/8']);
+    assert.equal(r.st.comments[0].body, `${MARKER}\nnot ours`);
+    const gql = r.st.requests.find((q) => q.path === '/graphql');
+    assert.equal(gql.headers.authorization, 'Bearer ghs_githubSECRET456');
+});
+
+test('non-numeric charge and timeout inputs are refused before any request', async () => {
+    for (const inputs of [{ 'INPUT_MAX-CHARGE-USD': 'Infinity' }, { 'INPUT_MAX-CHARGE-USD': 'abc' }, { 'INPUT_TIMEOUT-MINUTES': '0' }, { 'INPUT_TIMEOUT-MINUTES': 'NaN' }]) {
+        const r = await go(prWith('package-lock.json', '{"a":1}', '{"a":2}'), inputs);
+        assert.equal(r.code, 1, JSON.stringify(inputs));
+        assert.equal(r.st.requests.length, 0);
+    }
+});

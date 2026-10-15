@@ -34,7 +34,7 @@ inputs:
     description: 'Fail the step when the verdict is at least this level: "review", "notice" or "never".'
     default: 'never'
   timeout-minutes:
-    description: 'How long to wait for the analysis before giving up and stopping the Apify run.'
+    description: 'Timeout of the Apify run, in minutes. The run ends by itself after this; if it has not finished, the Action asks Apify to stop it and reports the lockfile as not analysed.'
     default: '10'
   actor:
     description: 'Apify Actor to call, as "username~actor-name". Change it only if you run your own copy.'

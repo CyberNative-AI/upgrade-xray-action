@@ -48,8 +48,8 @@ test('lockfile PR: one Apify run with redacted lockfiles, one comment, outputs s
     const body = r.st.comments[0].body;
     assert.ok(body.startsWith(MARKER));
     assert.match(body, /\*\*`web\/package-lock\.json`\*\*/);
-    assert.match(body, /`@solana\/web3\.js`/);
-    assert.doesNotMatch(body, /[^`]@solana/);
+    assert.ok(body.includes('@\u200Bsolana/web3.js'), 'scope is followed by a zero-width space');
+    assert.deepEqual(body.match(/@(?!\u200B)/g), null, 'no @ that a mention could start from');
     assert.match(body, /`svc\/uv\.lock` is new in this pull request/);
     assert.match(body, /Report by \[Upgrade X-Ray\]\(https:\/\/apify\.com\/cybernative-ai\/upgrade-xray\)/);
     assert.match(body, /\[Full report\]\(https:\/\/github\.com\/acme\/app\/actions\/runs\/42\)/);
@@ -129,21 +129,22 @@ test('a run that does not finish in time is aborted and reported as not analysed
     const r = await go(lockfilePr({ pollsUntilDone: 1e9 }), { 'INPUT_TIMEOUT-MINUTES': '0.0002', UPGRADE_XRAY_POLL_MS: '5' });
     assert.equal(r.st.aborted, true);
     assert.equal(r.outputs.verdict, 'error');
-    assert.match(r.st.comments[0].body, /ended with status TIMED-OUT/);
+    assert.match(r.st.comments[0].body, /did not finish within 1 minute\(s\).*A stop request was sent; Apify reports status `ABORTING`/);
+    assert.match(r.st.comments[0].body, /\[Run RUN1\]\(https:\/\/console\.apify\.com\/view\/runs\/RUN1\)/);
 });
 
 test('a failed start is not retried (no double charge) and is reported', async () => {
     const r = await go(lockfilePr({ startStatus: 500 }));
     assert.equal(r.st.posts, 1);
     assert.equal(r.outputs.verdict, 'error');
-    assert.match(r.st.comments[0].body, /could not be started/);
+    assert.match(r.st.comments[0].body, /not known whether a run started\. It was not retried/);
 });
 
 test('a huge report is shortened to fit a GitHub comment, with details blocks closed', async () => {
     const big = `## Upgrade X-Ray\n\n<details><summary>x</summary>\n\n${'- @scope/pkg 1.0.0 → 1.0.1 line\n'.repeat(5000)}</details>\n`;
     const r = await go(lockfilePr({ report: big }));
     const body = r.st.comments[0].body;
-    assert.ok(body.length <= 65536 && body.length <= COMMENT_LIMIT + 1000, `comment is ${body.length} chars`);
+    assert.ok(body.length <= COMMENT_LIMIT, `comment is ${body.length} chars`);
     assert.equal((body.match(/<details>/g) || []).length, (body.match(/<\/details>/g) || []).length);
     assert.match(body, /report shortened here/);
     assert.ok(r.summary.length > body.length, 'job summary keeps the full report');

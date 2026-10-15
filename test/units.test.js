@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pickLockfiles, redactLockfile } from '../src/lockfiles.js';
-import { quoteMentions, worstVerdict } from '../src/markdown.js';
+import { neutralizeMentions, worstVerdict } from '../src/markdown.js';
 
 test('pickLockfiles: supported names only, renames compare the old path, added files noted, max applied', () => {
     const files = [
@@ -34,7 +34,7 @@ test('redactLockfile strips user info and query strings and keeps host and path'
         '"resolved": "git+ssh://git@github.com/o/r.git#deadbeef",',
         '"resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz", "integrity": "sha512-AAA=="',
     ].join('\n');
-    const r = redactLockfile(t);
+    const r = redactLockfile(t, 'pnpm-lock.yaml');
     for (const secret of ['tok@', 'sig=1', 'pypi-AgEN', 'Signature=z', 'glpat-xyz', 'git@']) assert.ok(!r.includes(secret), secret);
     assert.match(r, /"https:\/\/npm\.corp\.example\/x\/-\/x-1\.0\.0\.tgz",/);
     assert.match(r, /pypi\.corp\.example\/simple\/x\/x-1\.0-py3-none-any\.whl#sha256=abc"/);
@@ -42,8 +42,11 @@ test('redactLockfile strips user info and query strings and keeps host and path'
     assert.match(r, /"https:\/\/registry\.npmjs\.org\/a\/-\/a-1\.0\.0\.tgz", "integrity": "sha512-AAA=="/);
 });
 
-test('quoteMentions and worstVerdict', () => {
-    assert.equal(quoteMentions('see @a/b, `@c/d` and x@y.z'), 'see `@a/b`, `@c/d` and x@y.z');
+test('neutralizeMentions and worstVerdict', () => {
+    const z = '\u200B';
+    const once = neutralizeMentions('see @a/b, `@c/d`, &#64;e, &#x40;f, &commat;g and x@y.z');
+    assert.equal(once, `see @${z}a/b, \`@${z}c/d\`, @${z}e, @${z}f, @${z}g and x@${z}y.z`);
+    assert.equal(neutralizeMentions(once), once);
     assert.equal(worstVerdict(['clean', 'incomplete']), 'incomplete');
     assert.equal(worstVerdict(['clean', 'error', 'notice']), 'notice');
     assert.equal(worstVerdict([]), 'skipped');

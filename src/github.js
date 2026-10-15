@@ -2,7 +2,7 @@
 import { request, HttpError } from './http.js';
 import { MARKER } from './markdown.js';
 
-export function githubClient(token, { base = 'https://api.github.com' } = {}) {
+export function githubClient(token, { base = 'https://api.github.com', graphqlUrl = `${base}/graphql` } = {}) {
     const headers = { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'upgrade-xray-action' };
     const call = (path, opts = {}) => request(`${base}${path}`, { ...opts, headers: { ...headers, ...opts.headers } });
     const enc = (p) => p.split('/').map(encodeURIComponent).join('/');
@@ -16,6 +16,19 @@ export function githubClient(token, { base = 'https://api.github.com' } = {}) {
             if (body.length < 100) break;
         }
         return all;
+    }
+
+    /**
+     * The account this token acts as: REST /user for user tokens, GraphQL viewer for app
+     * installation tokens (which cannot read /user). null when neither answers.
+     */
+    async function whoAmI() {
+        try { const login = (await call('/user', { retries: 0 })).body?.login; if (login) return login; } catch { /* installation token */ }
+        try {
+            const { body } = await request(graphqlUrl, { method: 'POST', headers, body: { query: 'query { viewer { login } }' }, retries: 0 });
+            if (body?.data?.viewer?.login) return body.data.viewer.login;
+        } catch { /* fall through */ }
+        return null;
     }
 
     return {
@@ -34,18 +47,24 @@ export function githubClient(token, { base = 'https://api.github.com' } = {}) {
             }
         },
 
-        /** Create the Action's comment, or update the one this token's account posted before. */
+        whoAmI,
+
+        /**
+         * Update the comment this token's account posted before, or create one. When the account
+         * is not known, a new comment is created and no existing comment is changed.
+         */
         async upsertComment(repo, number, body) {
-            let me = 'github-actions[bot]';
-            try { me = (await call('/user', { retries: 0 })).body.login; } catch { /* GITHUB_TOKEN cannot read /user */ }
-            const comments = await paged(`/repos/${repo}/issues/${number}/comments`, 20);
-            const mine = comments.find((c) => c.user?.login === me && c.body?.startsWith(MARKER));
-            if (mine) {
-                await call(`/repos/${repo}/issues/comments/${mine.id}`, { method: 'PATCH', body: { body } });
-                return { id: mine.id, updated: true };
+            const me = await whoAmI();
+            if (me) {
+                const comments = await paged(`/repos/${repo}/issues/${number}/comments`, 20);
+                const mine = comments.find((c) => c.user?.login === me && c.body?.startsWith(MARKER));
+                if (mine) {
+                    await call(`/repos/${repo}/issues/comments/${mine.id}`, { method: 'PATCH', body: { body } });
+                    return { id: mine.id, updated: true };
+                }
             }
             const { body: created } = await call(`/repos/${repo}/issues/${number}/comments`, { method: 'POST', body: { body } });
-            return { id: created.id, updated: false };
+            return { id: created.id, updated: false, identityUnknown: !me };
         },
     };
 }

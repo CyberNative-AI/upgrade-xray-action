@@ -6,8 +6,8 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { apifyClient, APIFY_API } from './apify.js';
 import { githubClient } from './github.js';
-import { pickLockfiles, redactLockfile, MAX_LOCKFILE_BYTES } from './lockfiles.js';
-import { composeComment, quoteMentions, worstVerdict, storeUrl } from './markdown.js';
+import { pickLockfiles, redactLockfile, RedactionError, MAX_LOCKFILE_BYTES } from './lockfiles.js';
+import { composeComment, neutralizeMentions, code, worstVerdict, storeUrl } from './markdown.js';
 
 const LOOPBACK = /^http:\/\/127\.0\.0\.1:\d+$/;
 /** The Apify API base: always api.apify.com, except a loopback server in tests. */
@@ -17,11 +17,18 @@ export function readInputs(env) {
     const get = (name) => (env[`INPUT_${name.toUpperCase()}`] ?? '').trim();
     const list = (name) => get(name).split('\n').map((s) => s.trim()).filter(Boolean);
     const bool = (name) => get(name).toLowerCase() === 'true';
-    const num = (name, def) => { const n = Number(get(name)); return Number.isFinite(n) && get(name) !== '' ? n : def; };
+    const num = (name, def) => {
+        if (get(name) === '') return def;
+        const n = Number(get(name));
+        if (!Number.isFinite(n)) throw new Error(`${name} must be a number, got "${get(name)}"`);
+        return n;
+    };
     const failOn = get('fail-on') || 'never';
     if (!['never', 'review', 'notice'].includes(failOn)) throw new Error(`fail-on must be "never", "review" or "notice", got "${failOn}"`);
     const maxChargeUsd = num('max-charge-usd', 1);
     if (!(maxChargeUsd > 0)) throw new Error('max-charge-usd must be a number above 0');
+    const timeoutMinutes = num('timeout-minutes', 10);
+    if (!(timeoutMinutes > 0)) throw new Error('timeout-minutes must be a number above 0');
     return {
         apifyToken: get('apify-token'),
         githubToken: get('github-token'),
@@ -32,7 +39,7 @@ export function readInputs(env) {
         maxChargeUsd,
         comment: get('comment').toLowerCase() !== 'false',
         failOn,
-        timeoutMs: num('timeout-minutes', 10) * 60_000,
+        timeoutMs: timeoutMinutes * 60_000,
         actor: get('actor') || 'cybernative-ai~upgrade-xray',
     };
 }
@@ -51,6 +58,22 @@ function makeLog(env, out) {
         },
         summary: (md) => appendFile('GITHUB_STEP_SUMMARY', `${md}\n`),
     };
+}
+
+/** What happened to a run that gave no report, in plain words, with every known run link. */
+export function notAnalysed(r) {
+    const mins = r.timeoutSecs ? `${Math.ceil(r.timeoutSecs / 60)} minute(s)` : 'its timeout';
+    const link = r.consoleUrl ? ` [Run ${r.runId}](${r.consoleUrl}) (in your Apify account).` : '';
+    const err = r.error ? ` (${code(r.error)})` : '';
+    const stopped = r.stop === 'sent' ? ` A stop request was sent; Apify reports status ${code(r.statusAfterStop)}.`
+        : r.stop === 'failed' ? ` The stop request failed${r.stopError ? ` (${code(r.stopError)})` : ''}, so the run may still be running; Apify ends it after ${mins} at most.`
+            : '';
+    if (r.status === 'NOT-STARTED') return `Apify did not start the run${err}. Nothing was charged for it.`;
+    if (r.status === 'START-UNKNOWN') return `the start request failed${err}, so it is not known whether a run started. It was not retried. Check the Actor's runs in your Apify account; a run started by this request ends after ${mins} at most.`;
+    if (r.problem === 'timeout') return `the run did not finish within ${mins} (last status ${code(r.status)}).${stopped}${link}`;
+    if (r.problem === 'poll-failed') return `the Action lost contact with the run${err} while its status was ${code(r.status)}.${stopped}${link}`;
+    if (r.problem === 'read-failed') return `the run finished, but its report could not be read${err}.${link}`;
+    return `the run ended with status ${code(r.status)}.${link}`;
 }
 
 /** Returns the process exit code. */
@@ -80,7 +103,8 @@ export async function run(env = process.env, out = process.stdout) {
     }
 
     const apify = apifyClient(inputs.apifyToken, { base: apifyBase(env), sleepMs: Number(env.UPGRADE_XRAY_POLL_MS || 0) });
-    const gh = githubClient(inputs.githubToken, { base: env.GITHUB_API_URL || 'https://api.github.com' });
+    const ghBase = env.GITHUB_API_URL || 'https://api.github.com';
+    const gh = githubClient(inputs.githubToken, { base: ghBase, graphqlUrl: env.GITHUB_GRAPHQL_URL || `${ghBase}/graphql` });
 
     // Build the list of Actor runs: one package-mode run, or one lockfile report per changed lockfile.
     const jobs = [];
@@ -96,18 +120,20 @@ export async function run(env = process.env, out = process.stdout) {
         for (const c of picked.checks) {
             const before = await gh.fileAt(baseRepo, c.beforePath, pr.base.sha, { maxBytes: MAX_LOCKFILE_BYTES });
             const after = await gh.fileAt(headRepo, c.path, pr.head.sha, { maxBytes: MAX_LOCKFILE_BYTES });
-            if (!before || !after) { notes.push(`\`${c.path}\` could not be read at both commits; skipped.`); continue; }
-            if (before.tooLarge || after.tooLarge) { notes.push(`\`${c.path}\` is larger than 20 MB; skipped.`); continue; }
+            if (!before || !after) { notes.push(`${code(c.path)} could not be read at both commits; skipped.`); continue; }
+            if (before.tooLarge || after.tooLarge) { notes.push(`${code(c.path)} is larger than 20 MB; skipped.`); continue; }
             if (before.text === after.text) continue;
-            jobs.push({
-                title: `\`${c.path}\``,
-                input: {
-                    lockfileBefore: redactLockfile(before.text),
-                    lockfileAfter: redactLockfile(after.text),
-                    lockfileName: c.path.slice(c.path.lastIndexOf('/') + 1),
-                    assumePublicRegistry: inputs.assumePublicRegistry,
-                },
-            });
+            const lockfileName = c.path.slice(c.path.lastIndexOf('/') + 1);
+            let lockfileBefore, lockfileAfter;
+            try {
+                lockfileBefore = redactLockfile(before.text, lockfileName);
+                lockfileAfter = redactLockfile(after.text, lockfileName);
+            } catch (e) {
+                if (!(e instanceof RedactionError)) throw e;
+                notes.push(`${code(c.path)} was not sent: ${e.message}.`);
+                continue;
+            }
+            jobs.push({ title: code(c.path), input: { lockfileBefore, lockfileAfter, lockfileName, assumePublicRegistry: inputs.assumePublicRegistry } });
         }
         if (!jobs.length) {
             log.info(`No changed lockfile to check.${notes.length ? ` ${notes.join(' ')}` : ''}`);
@@ -126,15 +152,14 @@ export async function run(env = process.env, out = process.stdout) {
         try {
             r = await apify.runActor(inputs.actor, job.input, { maxChargeUsd: inputs.maxChargeUsd, timeoutMs: inputs.timeoutMs });
         } catch (e) {
-            log.warning(`Upgrade X-Ray could not be started: ${e.message}`);
-            sections.push({ title: job.title, markdown: `⚪ Not analysed: the Upgrade X-Ray run could not be started (${e.message}).` });
-            verdicts.push('error');
-            continue;
+            r = { status: 'NOT-STARTED', error: e.message };
         }
-        runIds.push(r.runId);
-        log.info(`Apify run ${r.runId}: ${r.status}${r.verdict ? `, verdict ${r.verdict}` : ''}`);
-        if (r.status !== 'SUCCEEDED' || !r.report) {
-            sections.push({ title: job.title, markdown: `⚪ Not analysed: the Upgrade X-Ray run ended with status ${r.status}. [Run log](${r.consoleUrl}) (in your Apify account).` });
+        if (r.runId) runIds.push(r.runId);
+        log.info(`Apify run ${r.runId || '(none)'}: ${r.status}${r.problem ? ` (${r.problem})` : ''}${r.verdict ? `, verdict ${r.verdict}` : ''}`);
+        if (r.status !== 'SUCCEEDED' || r.problem || !r.report) {
+            const text = notAnalysed(r);
+            log.warning(text);
+            sections.push({ title: job.title, markdown: `⚪ Not analysed: ${text}` });
             verdicts.push('error');
             continue;
         }
@@ -143,13 +168,14 @@ export async function run(env = process.env, out = process.stdout) {
     }
     const verdict = worstVerdict(verdicts);
 
-    const fullMd = quoteMentions([...notes.map((n) => `> ${n}`), ...sections.map((s) => (s.title ? `**${s.title}**\n\n${s.markdown}` : s.markdown))].join('\n\n'));
+    const fullMd = neutralizeMentions([...notes.map((n) => `> ${n}`), ...sections.map((s) => (s.title ? `**${s.title}**\n\n${s.markdown}` : s.markdown))].join('\n\n'));
     log.summary(`${fullMd}\n\n<sub>Report by [Upgrade X-Ray](${storeUrl(inputs.actor)}).</sub>`);
     if (pr && inputs.comment) {
         const summaryUrl = env.GITHUB_SERVER_URL && env.GITHUB_RUN_ID ? `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}` : null;
         try {
             const c = await gh.upsertComment(pr.base.repo.full_name, pr.number, composeComment(sections, { notes, actor: inputs.actor, summaryUrl }));
             log.info(`${c.updated ? 'Updated' : 'Posted'} pull-request comment ${c.id}.`);
+            if (c.identityUnknown) log.info('The account behind github-token could not be determined, so a new comment was posted and earlier ones were left unchanged.');
         } catch (e) {
             log.warning(`Could not post the pull-request comment (${e.message}). The workflow needs "permissions: pull-requests: write"; the report is in the job summary.`);
         }

@@ -67,16 +67,17 @@ The analysis runs in **your** Apify account and is charged there, per event:
 | `fail-on` | `never` | Fail the step on `review` (red) or `notice` (yellow or red) verdicts. |
 | `comment` | `true` | Set `false` to write only the job summary. |
 | `max-charge-usd` | `1` | Maximum charge per Apify run. |
-| `timeout-minutes` | `10` | After this the Apify run is stopped and the lockfile reported as not analysed. |
+| `timeout-minutes` | `10` | The Apify run gets this as its own timeout, so it ends by itself even if the workflow is cancelled. If it has not finished by then, the Action asks Apify to stop it and reports the lockfile as not analysed, with the run link and whether the stop request worked. |
 | `actor` | `cybernative-ai~upgrade-xray` | Only change this if you run your own copy of the Actor. |
 
 **Outputs:** `verdict` (`review`, `notice`, `incomplete`, `clean`, `error` or `skipped`), `report-file` (the markdown report on the runner) and `run-ids`.
 
 ## What leaves your repository
 
-- **To Apify (your own account):** the old and new text of each changed lockfile, after the Action removes user names, passwords and query strings from the URLs in it. The run's input, log and results stay in your Apify account under your retention settings. The publisher cannot see them unless you share the run.
+- **To Apify (your own account):** the old and new text of each changed lockfile, after the Action removes user names, passwords and query strings from every URL in it. JSON lockfiles are parsed and sent re-formatted; for YAML and TOML lockfiles, escaped characters such as `\u0040` are decoded first. The Action then checks the exact text it is about to send. If a URL still has a user name, a password, a query string or quoting the check cannot read, that lockfile is not sent, and the comment says so. The run's input, log and results stay in your Apify account under your retention settings. The publisher cannot see them unless you share the run.
 - **To the public npm registry and PyPI (from the Actor):** names and versions of packages whose lockfile entry shows they come from that registry. Packages from private registries, git or local paths are listed in the report but not looked up, and their names are not sent anywhere.
-- **To the pull request:** the report as a comment, visible to everyone who can see the pull request. It contains package names and versions, and the sources of entries that were not looked up.
+- **To the pull request:** the report as a comment, visible to everyone who can see the pull request. It contains package names and versions, and the sources of entries that were not looked up. Every `@` in the comment, the job summary and the report file is followed by an invisible zero-width space, so npm scopes such as `@types/node` never notify GitHub users. If you copy a package name from the comment, delete that character. The comment is shortened to fit GitHub's size limit; the job summary has the full report.
+- **Which comment is updated:** the Action asks GitHub which account the token belongs to and updates only that account's earlier report. If GitHub does not say, the Action posts a new comment and changes no existing one.
 
 Nothing is sent to the publisher. There is no telemetry.
 

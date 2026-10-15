@@ -16,6 +16,7 @@ export async function fakeServer(cfg = {}) {
         output: cfg.output ?? { verdict: 'review' },
         pollsUntilDone: cfg.pollsUntilDone ?? 1,
         startStatus: cfg.startStatus ?? 200,
+        aborts: 0,
     };
     const server = http.createServer(async (req, res) => {
         const chunks = [];
@@ -37,10 +38,15 @@ export async function fakeServer(cfg = {}) {
             return res.end(st.files[key]);
         }
         if (url.pathname === '/user') return cfg.userLogin ? json(200, { login: cfg.userLogin }) : json(403, { message: 'Resource not accessible by integration' });
+        // An installation token can ask GraphQL who it is; viewerLogin: null plays a token that cannot.
+        if (url.pathname === '/graphql' && req.method === 'POST') {
+            const login = cfg.userLogin || (cfg.viewerLogin === undefined ? 'github-actions[bot]' : cfg.viewerLogin);
+            return login ? json(200, { data: { viewer: { login } } }) : json(403, { message: 'Resource not accessible by integration' });
+        }
         if ((m = url.pathname.match(/^\/repos\/[^/]+\/[^/]+\/issues\/(\d+)\/comments$/))) {
             if (req.method === 'GET') return json(200, Number(url.searchParams.get('page')) === 1 ? st.comments : []);
             if (cfg.commentStatus) return json(cfg.commentStatus, { message: 'Resource not accessible by integration' });
-            const c = { id: 1000 + st.comments.length, user: { login: cfg.userLogin || 'github-actions[bot]' }, body: JSON.parse(body).body };
+            const c = { id: 1000 + st.comments.length, user: { login: cfg.userLogin || cfg.postAs || 'github-actions[bot]' }, body: JSON.parse(body).body };
             st.comments.push(c);
             return json(201, c);
         }
@@ -52,14 +58,22 @@ export async function fakeServer(cfg = {}) {
         // Apify
         if (url.pathname.match(/^\/v2\/acts\/[^/]+\/runs$/) && req.method === 'POST') {
             st.posts++;
+            if (cfg.startDrop) return req.socket.destroy(); // the run may have been created, but the answer is lost
             if (st.startStatus !== 200) return json(st.startStatus, { error: { message: 'boom' } });
             return json(201, { data: { id: 'RUN1', status: 'RUNNING', defaultKeyValueStoreId: 'KV1' } });
         }
         if (url.pathname === '/v2/actor-runs/RUN1') {
             st.runPolls++;
+            if (cfg.pollStatus) return json(cfg.pollStatus, { error: { message: 'poll denied' } });
             return json(200, { data: { id: 'RUN1', status: st.runPolls >= st.pollsUntilDone ? 'SUCCEEDED' : 'RUNNING', defaultKeyValueStoreId: 'KV1' } });
         }
-        if (url.pathname === '/v2/actor-runs/RUN1/abort') { st.aborted = true; return json(200, { data: { id: 'RUN1', status: 'ABORTING' } }); }
+        if (url.pathname === '/v2/actor-runs/RUN1/abort') {
+            st.aborts++;
+            if (cfg.abortStatus) return json(cfg.abortStatus, { error: { message: 'abort denied' } });
+            st.aborted = true;
+            return json(200, { data: { id: 'RUN1', status: 'ABORTING' } });
+        }
+        if (cfg.readStatus && url.pathname.startsWith('/v2/key-value-stores/')) return json(cfg.readStatus, { error: { message: 'record denied' } });
         if (url.pathname === '/v2/key-value-stores/KV1/records/REPORT') { res.writeHead(200, { 'content-type': 'text/markdown' }); return res.end(st.report); }
         if (url.pathname === '/v2/key-value-stores/KV1/records/OUTPUT') return json(200, st.output);
         return json(599, { message: `unexpected ${req.method} ${url.pathname}` });
