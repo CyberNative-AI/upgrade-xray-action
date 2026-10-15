@@ -39,6 +39,10 @@ jobs:
       - uses: CyberNative-AI/upgrade-xray-action@v1
         with:
           apify-token: ${{ secrets.APIFY_TOKEN }}
+          # pnpm and Poetry lockfiles do not record where packages come from, so
+          # those packages are listed but not checked. If this repository installs
+          # only from the public npm registry or PyPI, uncomment the next line:
+          # assume-public-registry: true
 ```
 
 Use `pull_request`, not `pull_request_target`. Pull requests from forks then get no secrets and the Action skips them with a notice. With `pull_request_target`, anyone who opens a pull request could start paid runs in your Apify account.
