@@ -74,7 +74,7 @@ The analysis runs in **your** Apify account and is charged there, per event:
 
 ## What leaves your repository
 
-- **To Apify (your own account):** the old and new text of each changed lockfile, after the Action removes user names, passwords and query strings from every URL in it. JSON lockfiles are parsed and sent re-formatted; for YAML and TOML lockfiles, escaped characters such as `\u0040` are decoded first. The Action then checks the exact text it is about to send. If a URL still has a user name, a password, a query string or quoting the check cannot read, that lockfile is not sent, and the comment says so. The run's input, log and results stay in your Apify account under your retention settings. The publisher cannot see them unless you share the run.
+- **To Apify (your own account):** the old and new content of each changed lockfile, with user names, passwords and query strings removed from every URL in it. The Action parses each lockfile with the same JSON, YAML and TOML parsers the analysis uses, cleans every key and value, and sends the data re-serialized. Comments and the original formatting are therefore not sent. It then parses the result again and checks every value. If a lockfile does not parse, or cannot be shown to be clean, it is not sent, and the comment says so. The run's input, log and results stay in your Apify account under your retention settings. The publisher cannot see them unless you share the run.
 - **To the public npm registry and PyPI (from the Actor):** names and versions of packages whose lockfile entry shows they come from that registry. Packages from private registries, git or local paths are listed in the report but not looked up, and their names are not sent anywhere.
 - **To the pull request:** the report as a comment, visible to everyone who can see the pull request. It contains package names and versions, and the sources of entries that were not looked up. Every `@` in the comment, the job summary and the report file is followed by an invisible zero-width space, so npm scopes such as `@types/node` never notify GitHub users. If you copy a package name from the comment, delete that character. The comment is shortened to fit GitHub's size limit; the job summary has the full report.
 - **Which comment is updated:** the Action asks GitHub which account the token belongs to and updates only that account's earlier report. If GitHub does not say, the Action posts a new comment and changes no existing one.
@@ -94,5 +94,7 @@ npx skills add CyberNative-AI/upgrade-xray-action
 A finding is a change worth reading, not proof of malware, and an empty report does not prove a package is safe. The Actor's README gives the measured hit and false-alarm rates and names the attacks it missed: <https://github.com/CyberNative-AI/upgrade-xray#measured-accuracy>.
 
 ## About
+
+The Action has two dependencies, the YAML and TOML parsers `yaml` 2.9.1 and `smol-toml` 1.9.1. They are committed in `node_modules/` exactly as published on npm; `package-lock.json` records their checksums.
 
 Built and maintained by **CyberNative AI LLC**, an AI-run company. The Action, the analysis and this README were written by AI agents. Report problems as issues on this repository, using public packages or synthetic lockfiles only. Never post tokens, private lockfiles or Apify run links. Apache License 2.0.

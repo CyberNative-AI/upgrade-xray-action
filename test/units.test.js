@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pickLockfiles, redactLockfile } from '../src/lockfiles.js';
+import YAML from 'yaml';
+import { parse as parseToml } from 'smol-toml';
+import { pickLockfiles, cleanString, unsafeString, redactLockfile } from '../src/lockfiles.js';
 import { neutralizeMentions, worstVerdict } from '../src/markdown.js';
 
 test('pickLockfiles: supported names only, renames compare the old path, added files noted, max applied', () => {
@@ -28,18 +30,37 @@ test('pickLockfiles: supported names only, renames compare the old path, added f
 
 test('redactLockfile strips user info and query strings and keeps host and path', () => {
     const t = [
-        '"resolved": "https://user:tok@npm.corp.example/x/-/x-1.0.0.tgz?sig=1&exp=2",',
-        'url = "https://__token__:pypi-AgEN@pypi.corp.example/simple/x/x-1.0-py3-none-any.whl?Signature=z#sha256=abc"',
-        "  tarball: https://glpat-xyz@gitlab.example.com/api/v4/x.tgz",
-        '"resolved": "git+ssh://git@github.com/o/r.git#deadbeef",',
-        '"resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz", "integrity": "sha512-AAA=="',
+        "lockfileVersion: '9.0'",
+        'packages:',
+        '  a@1:',
+        '    resolution: {tarball: "https://user:tok@npm.corp.example/x/-/x-1.0.0.tgz?sig=1&exp=2"}',
+        '  b@1:',
+        '    resolution: {tarball: https://glpat-xyz@gitlab.example.com/api/v4/x.tgz}',
+        '  c@1:',
+        '    resolution: {repo: "git+ssh://git@github.com/o/r.git#deadbeef"}',
+        '  d@1:',
+        '    resolution: {integrity: sha512-AAA==, tarball: "https://registry.npmjs.org/a/-/a-1.0.0.tgz"}',
+        '',
     ].join('\n');
     const r = redactLockfile(t, 'pnpm-lock.yaml');
-    for (const secret of ['tok@', 'sig=1', 'pypi-AgEN', 'Signature=z', 'glpat-xyz', 'git@']) assert.ok(!r.includes(secret), secret);
-    assert.match(r, /"https:\/\/npm\.corp\.example\/x\/-\/x-1\.0\.0\.tgz",/);
-    assert.match(r, /pypi\.corp\.example\/simple\/x\/x-1\.0-py3-none-any\.whl#sha256=abc"/);
-    assert.match(r, /git\+ssh:\/\/github\.com\/o\/r\.git#deadbeef/);
-    assert.match(r, /"https:\/\/registry\.npmjs\.org\/a\/-\/a-1\.0\.0\.tgz", "integrity": "sha512-AAA=="/);
+    for (const secret of ['tok@', 'sig=1', 'glpat-xyz', 'git@']) assert.ok(!r.includes(secret), secret);
+    const p = YAML.parse(r).packages;
+    assert.equal(p['a@1'].resolution.tarball, 'https://npm.corp.example/x/-/x-1.0.0.tgz');
+    assert.equal(p['b@1'].resolution.tarball, 'https://gitlab.example.com/api/v4/x.tgz');
+    assert.equal(p['c@1'].resolution.repo, 'git+ssh://github.com/o/r.git#deadbeef');
+    assert.deepEqual(p['d@1'].resolution, { integrity: 'sha512-AAA==', tarball: 'https://registry.npmjs.org/a/-/a-1.0.0.tgz' });
+    const u = redactLockfile('url = "https://__token__:pypi-AgEN@pypi.corp.example/simple/x/x-1.0-py3-none-any.whl?Signature=z#sha256=abc"\n', 'uv.lock');
+    assert.equal(parseToml(u).url, 'https://pypi.corp.example/simple/x/x-1.0-py3-none-any.whl#sha256=abc');
+});
+
+test('cleanString: a URL runs to the end of the decoded string, as for a URL parser', () => {
+    assert.equal(cleanString('https://deploy:before SPACE@registry.example/p.tgz?sig=S'), 'https://registry.example/p.tgz');
+    assert.equal(cleanString('https://u:a"b\'c\\d@h/p?q#f?g'), 'https://h/p#f');
+    assert.equal(cleanString('see https://foo.org/docs and https://u:p@bar.org/x?y=1 too'), 'see https://foo.org/docs and https://bar.org/x');
+    assert.equal(cleanString('@scope/a@https://codeload.github.com/o/r/tar.gz/abc'), '@scope/a@https://codeload.github.com/o/r/tar.gz/abc');
+    assert.equal(cleanString('no url @ here?'), 'no url @ here?');
+    for (const s of ['https://a b@h', 'x https://h/p?q', 'https://h/https://u:p@i/']) assert.ok(unsafeString(s), s);
+    assert.ok(!unsafeString('https://registry.npmjs.org/@s/p/-/p-1.tgz#sha512'));
 });
 
 test('neutralizeMentions and worstVerdict', () => {

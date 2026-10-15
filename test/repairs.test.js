@@ -3,6 +3,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { run } from '../src/main.js';
+import YAML from 'yaml';
+import { parse as parseToml } from 'smol-toml';
 import { redactLockfile, RedactionError } from '../src/lockfiles.js';
 import { composeComment, COMMENT_LIMIT, MARKER } from '../src/markdown.js';
 import { fakeServer, stepEnv, captureStdout } from './fake.js';
@@ -88,27 +90,84 @@ for (const [name, f] of Object.entries(FORMATS)) {
     });
 }
 
-test('lockfiles whose URLs cannot be cleaned with certainty are not sent, and the comment says so', async () => {
+// Scalars where a URL does not end at whitespace, a quote or a line break: each must reach Apify
+// without its secret, checked on the transmitted body. WS is a URL with whitespace in its user info.
+const WS = 'https://deploy:before SPACE_SECRET@registry.example/pkg.tgz?sig=SIGNATURE';
+const npmLock = (url) => JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/pkg': { version: '1', resolved: url } } });
+const pnpm = (scalar) => `lockfileVersion: '9.0'\npackages:\n  pkg@1:\n    resolution:\n      tarball: ${scalar}\n`;
+const toml3 = (q) => `version = 1\n[[package]]\nname = "pkg"\nversion = "1"\nsource = { registry = ${q}https://deploy:before\nSPACE_SECRET@registry.example/simple?sig=SIGNATURE${q} }\n`;
+const SCALARS = {
+    'package-lock.json': [npmLock(WS), npmLock('https://u:a"b\\c\tSECRET@registry.example/x.tgz?x=SIGNATURE')],
+    'npm-shrinkwrap.json': [npmLock(WS)],
+    'pnpm-lock.yaml': [
+        `lockfileVersion: '9.0'\npackages:\n  pkg@1:\n    resolution: {tarball: "${WS}"}\n`,
+        pnpm(WS),
+        pnpm('https://deploy:before\n        SPACE_SECRET@registry.example/pkg.tgz?sig=SIGNATURE'),
+        pnpm('|\n        https://deploy:before SPACE_SECRET@registry.example/pkg.tgz?sig=SIGNATURE'),
+        pnpm('>-\n        https://deploy:before\n        SPACE_SECRET@registry.example/pkg.tgz?sig=SIGNATURE'),
+        pnpm('"https://deploy:before\n        SPACE_SECRET@registry.example/pkg.tgz?sig=SIGNATURE"'),
+        pnpm("'https://deploy:before''SPACE_SECRET@registry.example/pkg.tgz?sig=SIGNATURE'"),
+        pnpm('"https://deploy:before\\x20SPACE_SECRET\\u00a0x\\t@registry.example/pkg.tgz?sig=SIGNATURE"'),
+        `---\nlockfileVersion: '9.0'\npackages:\n  pnpm@11.0.0:\n    resolution: {tarball: "${WS}"}\n---\nlockfileVersion: '9.0'\npackages:\n  pkg@1:\n    resolution: {integrity: sha512-x}\n`,
+        `lockfileVersion: '9.0'\n# https://deploy:SPACE_SECRET@registry.example/?sig=SIGNATURE\npackages:\n  pkg@1:\n    resolution: {integrity: sha512-x} # SECRET\n`,
+        `lockfileVersion: '9.0'\n# https://deploy:SPACE_SECRET@registry.example/?sig=SIGNATURE\npackages:\n  'pkg@https://u:SPACE_SECRET@registry.example/p.tgz?sig=SIGNATURE':\n    resolution: {tarball: x} # SPACE_SECRET\n`,
+    ],
+    'uv.lock': [
+        `version = 1\n[[package]]\nname = "pkg"\nversion = "1"\nsource = { registry = "${WS}" }\n`,
+        `# https://deploy:SPACE_SECRET@pypi.corp.example/simple?sig=SIGNATURE\nversion = 1\n[[package]]\nname = "pkg"\nversion = "1"\nsource = { registry = "https://pypi.org/simple" } # SECRET\n`,
+        toml3('"""'),
+        toml3("'''"),
+        `version = 1\n[[package]]\nname = "pkg"\nversion = "1"\nsource = { registry = '''https://deploy:before'' SPACE_SECRET@registry.example/simple?sig=SIGNATURE''' }\n# SPACE_SECRET\n`,
+    ],
+    'poetry.lock': [
+        `[[package]]\nname = "pkg"\nversion = "1"\n[package.source]\ntype = "legacy"\nurl = "${WS}"\n`,
+        `[[package]]\nname = "pkg"\nversion = "1"\n[package.source]\ntype = "legacy"\nurl = 'https://deploy:before\tSPACE_SECRET@registry.example/simple?sig=SIGNATURE'\n`,
+    ],
+};
+
+for (const [name, cases] of Object.entries(SCALARS)) {
+    test(`${name}: URLs with whitespace, line breaks, block scalars, doubled quotes or comments never send their secret`, async () => {
+        for (const before of cases) {
+            const after = before.replace(/"1"|pkg@1|tarball: x/, (m) => m.replace(/1|x/, '2'));
+            assert.notEqual(after, before);
+            const r = await go(prWith(`app/${name}`, before, after));
+            const start = startOf(r.st);
+            assert.ok(start, `sent: ${before}`);
+            assert.equal(r.st.posts, 1);
+            for (const s of ['SECRET', 'SIGNATURE', 'deploy']) assert.ok(!start.body.includes(s), `${s} sent for ${before}\n${start.body}`);
+        }
+    });
+}
+
+test('lockfiles that do not parse, or that a cleaned URL would make ambiguous, are not sent, and the comment says so', async () => {
     const cases = {
-        'pnpm-lock.yaml': '    resolution: {tarball: "https://deploy:SEC\\"RET@npm.corp.example/x.tgz"}\n',
-        'uv.lock': 'sdist = { url = """https://deploy:SECRET\\\n@pypi.corp.example/x.tar.gz""" }\n',
-        'poetry.lock': "url = 'https://deploy:SEC''RET@pypi.corp.example/simple'\n",
-        'package-lock.json': JSON.stringify({ packages: { 'node_modules/x': { resolved: 'https:\\/\\/deploy:SECRET@registry.example/x.tgz' } } }),
+        'pnpm-lock.yaml': ['packages: {a: "x', /is not valid YAML/],
+        'uv.lock': ['source = "https://h/x', /is not valid TOML/],
+        'package-lock.json': ['{not json', /is not valid JSON/],
+        // Both keys become "a@https://h/p.tgz" once cleaned.
+        'npm-shrinkwrap.json': [JSON.stringify({ packages: { 'a@https://u:SECRET@h/p.tgz': {}, 'a@https://h/p.tgz': {} } }), /has two keys that are the same/],
+        // A backslash in a URL is never sent, even when the parsed value is clean.
+        'poetry.lock': ['url = "https://h/a\\\\SECRET"\n', /could not be removed with certainty/],
     };
-    for (const [name, line] of Object.entries(cases)) {
-        assert.throws(() => redactLockfile(line, name), RedactionError, name);
-        const r = await go(prWith(`app/${name}`, line, `${line}\n`));
+    for (const [name, [text, why]] of Object.entries(cases)) {
+        assert.throws(() => redactLockfile(text, name), (e) => e instanceof RedactionError && why.test(e.message), name);
+        const r = await go(prWith(`app/${name}`, text, `${text}\n`));
         assert.equal(r.st.posts, 0, `${name} was sent`);
-        assert.match(r.st.comments[0]?.body ?? r.stdout, /was not sent: it has URLs whose user names, passwords or query strings could not be removed with certainty/);
+        assert.match(r.st.comments[0]?.body ?? r.stdout, new RegExp(`was not sent: it [^.]*${why.source}`));
     }
-    assert.throws(() => redactLockfile('{not json', 'package-lock.json'), /not valid JSON/);
 });
 
-test('ordinary public lockfile lines pass unchanged in meaning', () => {
-    const yaml = "lockfileVersion: '9.0'\npackages:\n  '@scope/a@https://codeload.github.com/o/r/tar.gz/abc':\n    resolution: {tarball: https://codeload.github.com/o/r/tar.gz/abc}\n  b@1.0.0:\n    resolution: {integrity: sha512-AA==}\n";
-    assert.equal(redactLockfile(yaml, 'pnpm-lock.yaml'), yaml);
-    const toml = 'source = { registry = "https://pypi.org/simple" }\nwheels = [{ url = "https://files.pythonhosted.org/x-1-py3-none-any.whl", hash = "sha256:ab" }]\n';
-    assert.equal(redactLockfile(toml, 'uv.lock'), toml);
+test('ordinary public lockfiles keep their meaning', () => {
+    const yaml = "lockfileVersion: '9.0'\npackages:\n  '@scope/a@https://codeload.github.com/o/r/tar.gz/abc':\n    resolution: {tarball: https://codeload.github.com/o/r/tar.gz/abc}\n  b@1.0.0:\n    resolution: {integrity: sha512-AA==}\n    engines: {node: '>=18'}\n";
+    assert.deepEqual(YAML.parse(redactLockfile(yaml, 'pnpm-lock.yaml')), YAML.parse(yaml));
+    const stream = `---\n${yaml}\n---\n${yaml.replace('b@1.0.0', 'c@2.0.0')}`;
+    const docs = (t) => YAML.parseAllDocuments(t).map((d) => d.toJS());
+    assert.deepEqual(docs(redactLockfile(stream, 'pnpm-lock.yaml')), docs(stream));
+    assert.equal(docs(stream).length, 2);
+    const toml = 'version = 1\nrevision = 2\n[[package]]\nname = "a"\nversion = "1.0"\nsource = { registry = "https://pypi.org/simple" }\nwheels = [{ url = "https://files.pythonhosted.org/x-1-py3-none-any.whl", hash = "sha256:ab", size = 12 }]\n';
+    assert.deepEqual(parseToml(redactLockfile(toml, 'uv.lock')), parseToml(toml));
+    const json = npmLock('https://registry.npmjs.org/@scope/pub/-/pub-1.tgz');
+    assert.deepEqual(JSON.parse(redactLockfile(json, 'package-lock.json')), JSON.parse(json));
 });
 
 test('start request carries Apify\'s own timeout for the requested duration', async () => {
