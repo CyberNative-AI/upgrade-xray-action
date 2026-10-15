@@ -2,8 +2,8 @@ name: 'Upgrade X-Ray: npm & PyPI dependency update diff'
 description: 'What an npm or PyPI dependency update really changes: new install scripts, network/shell/eval calls, new dependencies.'
 author: 'CyberNative AI LLC'
 branding:
-  icon: 'search'
-  color: 'blue'
+  icon: 'eye'
+  color: 'orange'
 
 inputs:
   apify-token:
