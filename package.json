@@ -1,0 +1,10 @@
+{
+  "name": "upgrade-xray-action",
+  "version": "1.0.0",
+  "description": "GitHub Action: see what an npm or PyPI dependency update really changes, with Upgrade X-Ray on Apify.",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=24" },
+  "scripts": { "test": "node --test test/action.test.js test/units.test.js" },
+  "license": "Apache-2.0"
+}

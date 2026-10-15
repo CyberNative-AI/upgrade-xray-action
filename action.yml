@@ -1,0 +1,53 @@
+name: 'Upgrade X-Ray: npm & PyPI dependency update diff'
+description: 'What an npm or PyPI dependency update really changes: new install scripts, network/shell/eval calls, new dependencies.'
+author: 'CyberNative AI LLC'
+branding:
+  icon: 'search'
+  color: 'blue'
+
+inputs:
+  apify-token:
+    description: 'Your Apify API token. Store it as a secret (and as a Dependabot secret for Dependabot pull requests). Runs are made and billed in your Apify account.'
+    required: true
+  github-token:
+    description: 'Token used to read the changed lockfiles and to post the pull-request comment. Needs contents: read and pull-requests: write.'
+    default: ${{ github.token }}
+  packages:
+    description: 'Package mode instead of lockfile mode: one update per line, e.g. "npm:axios@1.7.9..1.8.0" or "pypi:requests@2.31.0..2.32.0". Charged per package analysed.'
+    default: ''
+  lockfiles:
+    description: 'Only check these lockfile paths (one per line). Default: every changed package-lock.json, npm-shrinkwrap.json, pnpm-lock.yaml, uv.lock and poetry.lock.'
+    default: ''
+  max-lockfiles:
+    description: 'At most this many changed lockfiles are checked per run (each one is a lockfile report).'
+    default: '3'
+  assume-public-registry:
+    description: 'Set to "true" only if every lockfile entry without a recorded source comes from the public npm registry or PyPI. Leave it off with a private registry or mirror.'
+    default: 'false'
+  max-charge-usd:
+    description: 'Maximum charge per Apify run, in US dollars. A run never goes over it.'
+    default: '1'
+  comment:
+    description: 'Post the report as a pull-request comment (updated on every run). Set to "false" to only write the job summary.'
+    default: 'true'
+  fail-on:
+    description: 'Fail the step when the verdict is at least this level: "review", "notice" or "never".'
+    default: 'never'
+  timeout-minutes:
+    description: 'How long to wait for the analysis before giving up and stopping the Apify run.'
+    default: '10'
+  actor:
+    description: 'Apify Actor to call, as "username~actor-name". Change it only if you run your own copy.'
+    default: 'cybernative-ai~upgrade-xray'
+
+outputs:
+  verdict:
+    description: 'Overall verdict: review, notice, incomplete, clean, error or skipped.'
+  report-file:
+    description: 'Path of the combined markdown report on the runner.'
+  run-ids:
+    description: 'Apify run IDs, comma-separated.'
+
+runs:
+  using: 'node24'
+  main: 'src/main.js'
