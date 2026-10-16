@@ -1,5 +1,5 @@
 name: 'Upgrade X-Ray: npm & PyPI dependency update diff'
-description: 'What an npm or PyPI dependency update really changes: new install scripts, network/shell/eval calls, new dependencies.'
+description: 'Supply chain security review of npm & PyPI dependency updates in Dependabot and Renovate PRs. Diffs the published files behind each lockfile change (package-lock, pnpm, uv, poetry, requirements): new install scripts, network, shell or eval calls, signs of a malicious package, new dependencies.'
 author: 'CyberNative AI LLC'
 branding:
   icon: 'eye'
