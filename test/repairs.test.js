@@ -180,7 +180,7 @@ test('URL spellings the Actor\'s URL parser accepts without "://" are refused, n
             assert.equal(r.st.posts, 0, `${name} sent: ${JSON.stringify(url)}`);
             for (const q of r.st.requests) for (const w of ['SECRET', 'SIGNATURE']) assert.ok(!(q.body ?? '').includes(w), `${w} left in a request`);
             assert.match(r.st.comments[0]?.body ?? r.stdout, name.endsWith('.txt')
-                ? /was not sent: it (has URLs whose user names, passwords or query strings could not be removed with certainty|has a line that is not a requirement, an option or a comment)/
+                ? /was not sent: it (has URLs whose user names, passwords or query strings could not be removed with certainty|has a line that is not a requirement, an option spelled in full or a comment)/
                 : /was not sent: it has URLs whose user names, passwords or query strings could not be removed with certainty/);
         }
     }

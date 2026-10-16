@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import YAML from 'yaml';
 import { parse as parseToml } from 'smol-toml';
-import { pickLockfiles, cleanString, unsafeString, redactLockfile } from '../src/lockfiles.js';
+import { pickLockfiles, cleanString, unsafeString, redactLockfile, RedactionError } from '../src/lockfiles.js';
 import { neutralizeMentions, worstVerdict } from '../src/markdown.js';
 
 test('pickLockfiles: supported names only, renames compare the old path, added files noted, max applied', () => {
@@ -98,12 +98,32 @@ test('redactLockfile: requirements files lose comments and credentials; pins, ha
     assert.equal(out, [
         '-i https://pypi.corp.example/simple',
         '--extra-index-url=https://pkgs.example/simple',
-        'Django==6.1.2      --hash=sha256:aaaa      --hash=sha256:bbbb',
+        'Django==6.1.2     --hash=sha256:aaaa     --hash=sha256:bbbb',
         'corp-lib @ https://files.corp.example/corp_lib-1.0.whl',
         '-e git+https://github.com/o/r.git@v1#egg=editable-lib',
         'uvicorn[standard]>=0.30 ; python_version >= "3.10"',
         '',
     ].join('\n'));
     assert.throws(() => redactLockfile('django==1\n//deploy:SECRET@h/x\n', 'requirements.txt'), /not a requirement/);
-    assert.throws(() => redactLockfile('django==1\npkg @ https://h/a\\SECRET\n', 'requirements.txt'), /could not be removed with certainty/);
+    assert.throws(() => redactLockfile('django==1\npkg @ https://h/a\\SECRET\n', 'requirements.txt'), /not a requirement/);
+});
+
+test('redactLockfile: requirements options are cleaned word by word and never dropped', () => {
+    const out = redactLockfile('-i https://u:p@pypi.org/simple?t=SECRET --extra-index-url https://private.example/simple\npkg==1\n', 'requirements.txt');
+    assert.equal(out, '-i https://pypi.org/simple --extra-index-url https://private.example/simple\npkg==1\n');
+});
+
+test('redactLockfile: requirements options pip could read differently refuse the file', () => {
+    for (const opt of ['--extra-index-u https://private.example/simple', '--not-a-pip-option x', '-ihttps://private.example/simple',
+        '--index-url "https://pypi.org/simple"', '--pre django==1.0', '-e . -i https://pypi.org/simple', 'django==1.0 --extra-index-url https://p.example/s']) {
+        assert.throws(() => redactLockfile(`${opt}\npkg==1\n`, 'requirements.txt'), /an option spelled in full/, opt);
+    }
+});
+
+test('redactLockfile: a comment continued by a backslash removes the next line, as in pip', () => {
+    const out = redactLockfile('django==1.0 # private note \\\nCOMMENT_CANARY\nflask==2.0\n# note \\\nrequests==2.0\n', 'requirements.txt');
+    assert.equal(out, 'django==1.0\nflask==2.0\nrequests==2.0\n');
+    for (const t of ['django==1.0\rCANARY==1\n', 'django==1.0\u2028CANARY==1\n', 'django==1.0\fCANARY==1\n', 'django==1.0\x1f#SECRET\n']) {
+        assert.throws(() => redactLockfile(t, 'requirements.txt'), RedactionError, JSON.stringify(t));
+    }
 });

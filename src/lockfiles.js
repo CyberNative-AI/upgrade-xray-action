@@ -48,31 +48,105 @@ const FORMATS = {
     yaml: { label: 'YAML', parse: yamlDocuments, stringify: (docs) => docs.map((d) => `---\n${YAML.stringify(d, { lineWidth: 0 })}`).join('') },
     toml: { label: 'TOML', parse: (t) => parseToml(t), stringify: (d) => stringifyToml(d) },
     // pip requirements: the Actor's logical lines (comments removed, continuations joined), one per line.
-    lines: { label: 'requirements file', invalid: 'it has a line that is not a requirement, an option or a comment', parse: requirementFile, stringify: (lines) => lines.map((l) => `${l}\n`).join('') },
+    lines: { label: 'requirements file', invalid: 'it has a line that is not a requirement, an option spelled in full or a comment', parse: requirementFile, clean: cleanWords, stringify: (lines) => lines.map((l) => `${l}\n`).join('') },
 };
-// The Actor's requirements grammar. A line outside it is never sent: the Actor would refuse the
-// file anyway, and a line this check cannot read could hold a split or unusual credential.
-const REQ_OPTION = /^(-[a-zA-Z]|--[a-z][a-z-]*)(?=[\s=]|$)/;
+// The Actor's requirements grammar and line reading, copied from its src/lockfile.js. A line outside
+// it is never sent: the Actor would refuse the file anyway, and a line this check cannot read could
+// hold a split or unusual credential, or a source the Actor would not see.
+// Line breaks other than \n and \r\n, and white space other than space and tab: pip (Python) and
+// JavaScript split and trim these differently.
+const REQ_ODD_CHAR = /[\0-\x08\x0b\x0c\x0e-\x1f\x7f\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]|\r(?!\n)/;
+
+/**
+ * Logical lines, as pip's preprocess makes them: a line ending in a backslash is joined to the
+ * next with the backslashes at both of its ends removed, unless it is a comment line; then a
+ * comment ("#" at the start or after white space) is removed from the joined line, so a comment
+ * continued by a backslash also removes the line after it.
+ */
+function requirementLines(text) {
+    const body = text.replace(/^\ufeff/, '');
+    if (REQ_ODD_CHAR.test(body)) throw new Error('requirements file: it has a control character, an unusual line break or an unusual space');
+    const joined = [];
+    let cur = null;
+    for (const line of body.split(/\r?\n/)) {
+        const comment = /^\s*#/.test(line);
+        if (line.endsWith('\\') && !comment) { cur = (cur ?? '') + line.replace(/^\\+|\\+$/g, ''); continue; }
+        joined.push((cur ?? '') + (comment ? ` ${line}` : line));
+        cur = null;
+    }
+    if (cur !== null) joined.push(cur);
+    return joined.map((l) => l.replace(/(^|\s+)#.*$/, '').trim()).filter(Boolean);
+}
+
+// The options pip reads in a requirements file, spelled in full. pip also takes abbreviations
+// (--extra-index-u) and a few other options; a file with one of those is refused.
+const REQ_OPTIONS = new Map([
+    ['-i', 'index'], ['--index-url', 'index'], ['--extra-index-url', 'extra'], ['-f', 'extra'], ['--find-links', 'extra'],
+    ['--no-index', 'no-index'], ['-r', 'include'], ['--requirement', 'include'], ['-c', 'include'], ['--constraint', 'include'],
+    ['-e', 'editable'], ['--editable', 'editable'], ['--no-binary', 'other'], ['--only-binary', 'other'],
+    ['--trusted-host', 'other'], ['--use-feature', 'other'], ['--pre', 'flag'], ['--prefer-binary', 'flag'], ['--require-hashes', 'flag'],
+]);
+const REQ_FLAGS = new Set(['no-index', 'flag']);
 const REQ_OP = String.raw`(?:===?|~=|!=|<=?|>=?)\s*[^\s;,]+`;
-const REQ_LINE = new RegExp(String.raw`^[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[^\]]*\])?\s*(?:${REQ_OP}(?:\s*,\s*${REQ_OP})*|@\s*\S+)?\s*(?:;[^-]*(?:-(?!-hash)[^-]*)*)?(?:\s*--hash[=\s]\S+)*\s*$`);
+// name [extras] [version specifiers | @ url] [; marker]
+const REQ_ARGS = new RegExp(String.raw`^[A-Za-z0-9][A-Za-z0-9._-]*\s*(?:\[[^\]]*\])?\s*(?:${REQ_OP}(?:\s*,\s*${REQ_OP})*|@\s*\S+)?\s*(?:;.*)?$`);
+
+/** Options as [kind, value] pairs; null for anything else (pip splits these with shlex, so quotes and backslashes are refused). */
+function requirementOptions(text) {
+    if (/["'\\]/.test(text)) return null;
+    const tokens = text.split(/[ \t]+/).filter(Boolean);
+    const out = [];
+    for (let i = 0; i < tokens.length; i++) {
+        const eq = tokens[i].startsWith('--') ? tokens[i].indexOf('=') : -1;
+        const kind = REQ_OPTIONS.get(eq < 0 ? tokens[i] : tokens[i].slice(0, eq));
+        if (!kind) return null;
+        if (REQ_FLAGS.has(kind)) { if (eq >= 0) return null; out.push([kind, '']); continue; }
+        const value = eq < 0 ? tokens[++i] : tokens[i].slice(eq + 1);
+        if (!value) return null;
+        out.push([kind, value]);
+    }
+    return out;
+}
+
+/**
+ * One logical line: { options } for an option line, { requirement } for a requirement (its
+ * --hash options checked and dropped), or null when it is outside this grammar. As in pip, a
+ * line's options start at its first space-separated word that starts with "-".
+ */
+function readRequirementLine(line) {
+    if (line.includes('\\')) return null;
+    const words = line.split(' ');
+    const at = words.findIndex((w) => w.startsWith('-'));
+    if (at === 0) {
+        const options = requirementOptions(line);
+        // pip ignores the other options of an editable line; reading them could make a file public.
+        if (!options || (options.length > 1 && options.some(([k]) => k === 'editable'))) return null;
+        return { options };
+    }
+    const requirement = (at < 0 ? words : words.slice(0, at)).join(' ');
+    if (!REQ_ARGS.test(requirement)) return null;
+    if (at > 0) {
+        const opts = words.slice(at).join(' ');
+        if (/["'\\]/.test(opts)) return null;
+        const tokens = opts.split(/[ \t]+/).filter(Boolean);
+        for (let i = 0; i < tokens.length; i++) {
+            if (/^--hash=\S/.test(tokens[i])) continue;
+            if (tokens[i] === '--hash' && tokens[i + 1]) { i++; continue; }
+            return null;
+        }
+    }
+    return { requirement };
+}
+
 function requirementFile(text) {
     const lines = requirementLines(text);
-    if (!lines.every((l) => REQ_OPTION.test(l) || REQ_LINE.test(l))) throw new Error('not a requirements line');
+    if (!lines.every((l) => readRequirementLine(l))) throw new Error('not a requirements line');
     return lines;
 }
-// Same as the Actor's requirementLines.
-function requirementLines(text) {
-    const out = [];
-    let cur = '';
-    for (const raw of text.split(/\r?\n/)) {
-        const line = raw.replace(/(^|\s)#.*$/, '');
-        if (/\\\s*$/.test(line)) { cur += line.replace(/\\\s*$/, ' '); continue; }
-        cur += line;
-        if (cur.trim()) out.push(cur.trim());
-        cur = '';
-    }
-    if (cur.trim()) out.push(cur.trim());
-    return out;
+// Each word of a line is cleaned on its own, as pip splits it: a URL's query is removed up to the
+// end of its word, never into the options after it.
+function cleanWords(line) {
+    return line.split(/([ \t]+)/).map((w, i) => (i % 2 ? w : cleanString(w))).join('');
 }
 function yamlDocuments(text) {
     const docs = YAML.parseAllDocuments(text);
@@ -251,7 +325,7 @@ export function redactLockfile(text, name) {
     const fmt = formatOf(name);
     let doc;
     try { doc = fmt.parse(text); } catch { throw new RedactionError(fmt.invalid || `it is not valid ${fmt.label}`); }
-    const out = fmt.stringify(mapStrings(doc, cleanString));
+    const out = fmt.stringify(mapStrings(doc, fmt.clean || cleanString));
     let check;
     try { check = fmt.parse(out); } catch { throw new RedactionError(`it could not be re-serialized as valid ${fmt.label}`); }
     if (someString(check, (x) => unsafeString(x) || parserFindsSecret(x)) || unsafeUrls(out).length) throw new RedactionError('it has URLs whose user names, passwords or query strings could not be removed with certainty');
