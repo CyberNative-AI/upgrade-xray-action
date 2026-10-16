@@ -186,6 +186,16 @@ test('URL spellings the Actor\'s URL parser accepts without "://" are refused, n
     }
 });
 
+test('a requirements file with an option set from an environment variable is never sent, and the comment says why', async () => {
+    const file = (v) => `--index-url https://pypi.org/simple?source=\${OPTS}\nreview-private-name==${v}\n`;
+    for (const assume of ['false', 'true']) {
+        const r = await go(prWith('requirements.txt', file('1.0'), file('1.1')), { 'INPUT_ASSUME-PUBLIC-REGISTRY': assume });
+        assert.equal(r.st.posts, 0, `sent with assume-public-registry ${assume}`);
+        for (const q of r.st.requests) assert.ok(!(q.body ?? '').includes('review-private-name'), 'name left in a request');
+        assert.match(r.st.comments[0]?.body ?? r.stdout, /was not sent: it has an option set from an environment variable/);
+    }
+});
+
 test('the URL parser check keeps ordinary lockfile values that are not credentialed URLs', () => {
     const fine = ['npm:@scope/p@^1.0.0', 'sha256:ab', 'file:../a@b', 'link:../x', 'workspace:*', 'github:o/r#abc',
         'git+ssh://github.com/o/r.git#abc', 'Q: why? Because it is fast', 'https://registry.npmjs.org/@s/p/-/p-1.tgz#sha512',

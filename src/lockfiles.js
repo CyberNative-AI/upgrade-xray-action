@@ -140,7 +140,12 @@ function readRequirementLine(line) {
 
 function requirementFile(text) {
     const lines = requirementLines(text);
-    if (!lines.every((l) => readRequirementLine(l))) throw new Error('not a requirements line');
+    const read = lines.map(readRequirementLine);
+    if (!read.every(Boolean)) throw new Error('not a requirements line');
+    // pip replaces ${VAR} before it splits an option line, so the line may add any index, even in a
+    // value pip otherwise ignores. The Actor makes such a file private, but cleaning could remove the
+    // ${VAR} with a URL's query or user name, so the file is never sent.
+    if (read.some((r, i) => r.options && lines[i].includes('${'))) throw new RedactionError('it has an option set from an environment variable (${...}), which may add a package source');
     return lines;
 }
 // Each word of a line is cleaned on its own, as pip splits it: a URL's query is removed up to the
@@ -324,7 +329,7 @@ export function unsafeUrls(text) {
 export function redactLockfile(text, name) {
     const fmt = formatOf(name);
     let doc;
-    try { doc = fmt.parse(text); } catch { throw new RedactionError(fmt.invalid || `it is not valid ${fmt.label}`); }
+    try { doc = fmt.parse(text); } catch (e) { throw e instanceof RedactionError ? e : new RedactionError(fmt.invalid || `it is not valid ${fmt.label}`); }
     const out = fmt.stringify(mapStrings(doc, fmt.clean || cleanString));
     let check;
     try { check = fmt.parse(out); } catch { throw new RedactionError(`it could not be re-serialized as valid ${fmt.label}`); }

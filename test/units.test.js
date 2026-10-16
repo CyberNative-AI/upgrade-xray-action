@@ -120,6 +120,19 @@ test('redactLockfile: requirements options pip could read differently refuse the
     }
 });
 
+test('redactLockfile: a requirements option set from an environment variable refuses the file before its URLs are cleaned', () => {
+    // pip replaces ${VAR} first, so each of these may add an index the cleaned file would not show.
+    for (const opt of ['--index-url https://pypi.org/simple?source=${OPTS}', '--trusted-host https://example.invalid/?source=${OPTS}',
+        '--extra-index-url https://${TOKEN}@private.example/simple', '-i https://pypi.org/simple --trusted-host h${OPTS}', '-e git+https://${TOKEN}@github.com/o/r#egg=lib']) {
+        assert.throws(() => redactLockfile(`-i https://pypi.org/simple\n${opt}\npkg==1\n`, 'requirements.txt'),
+            (e) => e instanceof RedactionError && /set from an environment variable/.test(e.message), opt);
+    }
+    // A requirement line never changes pip's sources, and a static query is only cleaned.
+    assert.equal(redactLockfile('-i https://pypi.org/simple\nlib @ https://h.example/lib.whl?t=${TOKEN}\npkg==1\n', 'requirements.txt'),
+        '-i https://pypi.org/simple\nlib @ https://h.example/lib.whl\npkg==1\n');
+    assert.equal(redactLockfile('--index-url https://pypi.org/simple?source=STATIC\npkg==1\n', 'requirements.txt'), '--index-url https://pypi.org/simple\npkg==1\n');
+});
+
 test('redactLockfile: a comment continued by a backslash removes the next line, as in pip', () => {
     const out = redactLockfile('django==1.0 # private note \\\nCOMMENT_CANARY\nflask==2.0\n# note \\\nrequests==2.0\n', 'requirements.txt');
     assert.equal(out, 'django==1.0\nflask==2.0\nrequests==2.0\n');
