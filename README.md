@@ -1,6 +1,6 @@
 # Upgrade X-Ray for npm and PyPI dependency updates
 
-**See what a dependency update really changes before you merge it, computed from the published npm and PyPI files rather than the changelog.**
+**In seconds, at $0.02 per package diff or $0.25 per lockfile report, see what a dependency update really changes in its published npm or PyPI files (new install scripts; new network, shell or eval calls; removed exports; new dependencies) without installing it.**
 
 When a pull request changes a lockfile or a pip requirements file (a Dependabot or Renovate update, or your own), this Action sends the old and new lockfile to [Upgrade X-Ray](https://apify.com/cybernative-ai/upgrade-xray) on Apify and posts the result as one pull-request comment. For every package that changed, the comment shows:
 
