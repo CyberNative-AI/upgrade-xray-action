@@ -165,6 +165,8 @@ function cleanWords(line) {
 // what the Actor reads. Anything outside them is refused and never sent.
 const YARN_BARE = /^[A-Za-z][^\s:,"\\[\]]*/;
 const YARN_QUOTED = /^"[^"\\\0-\x1f\x7f]*"/;
+// Yarn writes lines of a few hundred characters; a longer line is refused before it is scanned.
+const YARN_MAX_LINE = 16384;
 
 function yarnToken(rest) {
     const m = rest.match(YARN_QUOTED) || rest.match(YARN_BARE);
@@ -180,8 +182,12 @@ function parseYarnV1(text) {
     const stack = [];
     const seenKeys = new Set();
     for (const [i, line0] of text.split(/\r?\n/).entries()) {
-        const line = line0.replace(/ +$/, '');
         const bad = (why) => new Error(`yarn.lock line ${i + 1}: ${why}`);
+        if (line0.length > YARN_MAX_LINE) throw bad(`it is longer than ${YARN_MAX_LINE} characters`);
+        // Trailing spaces are dropped by a loop: a regex such as / +$/ retries at every space of a run.
+        let end = line0.length;
+        while (end > 0 && line0.charCodeAt(end - 1) === 32) end--;
+        const line = line0.slice(0, end);
         if (!line || /^ *#/.test(line)) continue;
         const indent = line.match(/^ */)[0].length;
         if (indent % 2 || /^ *\t/.test(line)) throw bad('indentation is not a multiple of two spaces');

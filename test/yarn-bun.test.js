@@ -150,3 +150,19 @@ test('yarn.lock and bun.lock that do not parse, or that cleaning would make ambi
         for (const q of r.st.requests) assert.ok(!(q.body ?? '').includes('SECRET'), 'secret left in a request');
     }
 });
+
+test('yarn.lock: long space runs and long comments are read in linear time; a line over 16 KiB is refused', () => {
+    const header = '# yarn lockfile v1\n\n';
+    const entry = 'left-pad@^1.0.0:\n  version "1.1.0"\n  resolved "https://registry.yarnpkg.com/left-pad/-/left-pad-1.1.0.tgz"\n';
+    const run = ' '.repeat(16000);
+    const start = process.hrtime.bigint();
+    // 64 comment lines just under the cap, each a space run; comments are not sent.
+    const comments = Array.from({ length: 64 }, () => `#${run}x`).join('\n');
+    assert.equal(redactLockfile(`${header}${comments}\n\n${entry}`, 'yarn.lock'), `# yarn lockfile v1\n\n"left-pad@^1.0.0":\n  "version" "1.1.0"\n  "resolved" "https://registry.yarnpkg.com/left-pad/-/left-pad-1.1.0.tgz"\n`);
+    for (let i = 0; i < 64; i++) assert.throws(() => redactLockfile(`${header}a${run}b:\n`, 'yarn.lock'), RedactionError);
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    assert.ok(ms < 2000, `took ${ms} ms`);
+    for (const line of [`#${' '.repeat(65536)}x`, `a${' '.repeat(65536)}b:`]) {
+        assert.throws(() => redactLockfile(`${header}${line}\n`, 'yarn.lock'), RedactionError);
+    }
+});
