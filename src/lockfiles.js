@@ -56,7 +56,7 @@ const FORMATS = {
     yarn: { label: 'Yarn lockfile', parse: parseYarnV1, stringify: stringifyYarnV1 },
     // bun.lock is JSON with trailing commas; it is sent as plain JSON.
     jsonc: { label: 'bun.lock', parse: parseBunText, stringify: (d) => `${JSON.stringify(d, null, 2)}\n` },
-    lines: { label: 'requirements file', invalid: 'it has a line that is not a requirement, an option spelled in full or a comment', parse: requirementFile, clean: cleanWords, stringify: (lines) => lines.map((l) => `${l}\n`).join('') },
+    lines: { label: 'requirements file', invalid: 'it has a line that is not a requirement, an option spelled in full or a comment', parse: requirementFile, clean: cleanWords, stringify: (lines) => lines.map((l) => `${continuedLine(l)}\n`).join('') },
 };
 // The Actor's requirements grammar and line reading, copied from its src/lockfile.js. A line outside
 // it is never sent: the Actor would refuse the file anyway, and a line this check cannot read could
@@ -65,11 +65,17 @@ const FORMATS = {
 // JavaScript split and trim these differently.
 const REQ_ODD_CHAR = /[\0-\x08\x0b\x0c\x0e-\x1f\x7f\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]|\r(?!\n)/;
 
+// A physical line longer than this is refused before any pattern reads it. pip-compile writes
+// lines of a few hundred characters at most: a requirement with many hashes is continued over
+// many short lines.
+const REQ_MAX_LINE = 16384;
+
 /**
  * Logical lines, as pip's preprocess makes them: a line ending in a backslash is joined to the
  * next with the backslashes at both of its ends removed, unless it is a comment line; then a
  * comment ("#" at the start or after white space) is removed from the joined line, so a comment
- * continued by a backslash also removes the line after it.
+ * continued by a backslash also removes the line after it. Every step is linear in the line's
+ * length: a joined line can be as long as the file.
  */
 function requirementLines(text) {
     const body = text.replace(/^\ufeff/, '');
@@ -77,13 +83,51 @@ function requirementLines(text) {
     const joined = [];
     let cur = null;
     for (const line of body.split(/\r?\n/)) {
+        if (line.length > REQ_MAX_LINE) throw new Error(`requirements file: it has a line longer than ${REQ_MAX_LINE} characters`);
         const comment = /^\s*#/.test(line);
-        if (line.endsWith('\\') && !comment) { cur = (cur ?? '') + line.replace(/^\\+|\\+$/g, ''); continue; }
+        if (line.endsWith('\\') && !comment) { cur = (cur ?? '') + trimBackslashes(line); continue; }
         joined.push((cur ?? '') + (comment ? ` ${line}` : line));
         cur = null;
     }
     if (cur !== null) joined.push(cur);
-    return joined.map((l) => l.replace(/(^|\s+)#.*$/, '').trim()).filter(Boolean);
+    return joined.map((l) => removeComment(l).trim()).filter(Boolean);
+}
+
+// The Actor refuses a line longer than REQ_MAX_LINE, but a joined line can be longer (a requirement
+// with many hashes). Such a line is sent split at spaces into continued lines, as pip-compile writes
+// it; pip joins them back into the same line. A line with no space to split at is left as it is,
+// and the check that parses the result then refuses the file.
+function continuedLine(line) {
+    const out = [];
+    let at = 0;
+    while (line.length - at > REQ_MAX_LINE) {
+        const cut = line.lastIndexOf(' ', at + REQ_MAX_LINE - 2);
+        if (cut <= at) break;
+        out.push(`${line.slice(at, cut + 1)}\\`);
+        at = cut + 1;
+    }
+    out.push(line.slice(at));
+    return out.join('\n');
+}
+
+// line.replace(/^\\+|\\+$/g, ''), without the retry at every backslash of a run inside the line.
+function trimBackslashes(line) {
+    let a = 0; let b = line.length;
+    while (a < b && line[a] === '\\') a++;
+    while (b > a && line[b - 1] === '\\') b--;
+    return line.slice(a, b);
+}
+
+// line.replace(/(^|\s+)#.*$/, ''), which retries at every space of a run: the first "#" at the
+// start of the line or after white space ends it, with that white space.
+function removeComment(line) {
+    for (let i = line.indexOf('#'); i >= 0; i = line.indexOf('#', i + 1)) {
+        if (i === 0) return '';
+        let j = i;
+        while (j > 0 && /\s/.test(line[j - 1])) j--;
+        if (j < i) return line.slice(0, j);
+    }
+    return line;
 }
 
 // The options pip reads in a requirements file, spelled in full. pip also takes abbreviations
@@ -132,7 +176,9 @@ function readRequirementLine(line) {
         return { options };
     }
     const requirement = (at < 0 ? words : words.slice(0, at)).join(' ');
-    if (!REQ_ARGS.test(requirement)) return null;
+    // REQ_ARGS reads a run of white space the same as one space. Its adjacent \s* would otherwise
+    // try every way of sharing a long run between them.
+    if (!REQ_ARGS.test(requirement.replace(/\s+/g, ' '))) return null;
     if (at > 0) {
         const opts = words.slice(at).join(' ');
         if (/["'\\]/.test(opts)) return null;

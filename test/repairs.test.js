@@ -355,3 +355,28 @@ test('non-numeric charge and timeout inputs are refused before any request', asy
         assert.equal(r.st.requests.length, 0);
     }
 });
+
+test('requirements: long space runs are read in linear time; a line over 16384 characters is refused', () => {
+    // A space run that does not end in "#": the comment pattern retried at every space of it.
+    const run = ' '.repeat(16000);
+    const text = Array.from({ length: 64 }, (_, i) => `p${i}==1${run}; os_name == "posix"`).join('\n');
+    const start = process.hrtime.bigint();
+    assert.equal(redactLockfile(text, 'requirements.txt').split('\n').filter(Boolean).length, 64);
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    assert.ok(ms < 2000, `took ${ms} ms`);
+    assert.throws(() => redactLockfile(`p==1${' '.repeat(65536)}; os_name == "posix"\n`, 'requirements.txt'), RedactionError);
+    // A requirement with many hashes is many short lines joined into one long line; it is still sent.
+    const hashes = Array.from({ length: 300 }, (_, i) => `    --hash=sha256:${String(i).padStart(64, '0')}`).join(' \\\n');
+    // It is longer than the Actor's line limit, so it is sent as continued lines that pip joins back.
+    const text2 = `numpy==2.0.0 \\\n${hashes}\n`;
+    const sent = redactLockfile(text2, 'requirements.txt');
+    assert.ok(text2.replace(/\\\n/g, '').length > 16384);
+    assert.ok(sent.split('\n').length > 2 && sent.split('\n').every((l) => l.length <= 16384));
+    assert.equal(sent.replace(/\\\n/g, ''), text2.replace(/\\\n/g, ''));
+    // A space just at the limit: the split before it would make a line one character too long.
+    const head = 'numpy==2.0.0 --hash=sha256:';
+    const atLimit = `${head.slice(0, 13)}\\\n${head.slice(13)}${'a'.repeat(16383 - head.length)} \\\n--hash=sha256:b\n`;
+    assert.equal(redactLockfile(atLimit, 'requirements.txt').replace(/\\\n/g, ''), atLimit.replace(/\\\n/g, ''));
+    // pip removes the backslashes at both ends of a continued line (pip 24: "django==1.0.1").
+    assert.equal(redactLockfile('django==1.\\\n\\0.\\\n1\n', 'requirements.txt'), 'django==1.0.1\n');
+});
