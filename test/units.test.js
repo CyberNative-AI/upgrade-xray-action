@@ -11,7 +11,7 @@ test('pickLockfiles: supported names only, renames compare the old path, added f
         { filename: 'b/pnpm-lock.yaml', status: 'renamed', previous_filename: 'old/pnpm-lock.yaml' },
         { filename: 'c/uv.lock', status: 'added' },
         { filename: 'd/poetry.lock', status: 'removed' },
-        { filename: 'e/yarn.lock', status: 'modified' },
+        { filename: 'e/Pipfile.lock', status: 'modified' },
         { filename: 'f/npm-shrinkwrap.json', status: 'modified' },
         { filename: 'g/poetry.lock', status: 'modified' },
     ];
@@ -23,9 +23,9 @@ test('pickLockfiles: supported names only, renames compare the old path, added f
     ]);
     assert.ok(notes.some((n) => n.includes('`c/uv.lock` is new')));
     assert.ok(notes.some((n) => n.includes('not checked `g/poetry.lock`')));
-    const only = pickLockfiles(files, { only: ['g/poetry.lock', 'e/yarn.lock'] });
+    const only = pickLockfiles(files, { only: ['g/poetry.lock', 'e/Pipfile.lock'] });
     assert.deepEqual(only.checks.map((c) => c.path), ['g/poetry.lock']);
-    assert.ok(only.notes.some((n) => n.includes('`e/yarn.lock` is not a supported')));
+    assert.ok(only.notes.some((n) => n.includes('`e/Pipfile.lock` is not a supported')));
 });
 
 test('redactLockfile strips user info and query strings and keeps host and path', () => {

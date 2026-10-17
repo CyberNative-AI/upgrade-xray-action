@@ -9,7 +9,7 @@ Upgrade X-Ray compares the published npm or PyPI files of the old and new versio
 
 ## When to use it
 
-- A pull request changes `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `uv.lock`, `poetry.lock` or a pip requirements file (`requirements*.txt`; exact `==` pins are compared).
+- A pull request changes `package-lock.json`, `npm-shrinkwrap.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `uv.lock`, `poetry.lock` or a pip requirements file (`requirements*.txt`; exact `==` pins are compared).
 - Someone asks whether updating a package from version A to B is safe or what it changes.
 
 Ask before the first paid call in a session if the user has not already agreed to Apify charges.

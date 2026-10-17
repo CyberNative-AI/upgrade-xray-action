@@ -27,6 +27,8 @@ on:
       - '**/package-lock.json'
       - '**/npm-shrinkwrap.json'
       - '**/pnpm-lock.yaml'
+      - '**/yarn.lock'
+      - '**/bun.lock'
       - '**/uv.lock'
       - '**/poetry.lock'
       - '**/requirements*.txt'
@@ -41,7 +43,7 @@ jobs:
       - uses: CyberNative-AI/upgrade-xray-action@v1
         with:
           apify-token: ${{ secrets.APIFY_TOKEN }}
-          # pnpm, Poetry and most requirements files do not record where packages
+          # pnpm, Yarn 2+, bun, Poetry and most requirements files do not record where packages
           # come from, so those packages are listed but not checked. If this
           # repository installs only from the public npm registry or PyPI,
           # uncomment the next line:
@@ -69,7 +71,7 @@ The analysis runs in **your** Apify account and is charged there, per event:
 | `github-token` | `${{ github.token }}` | Reads the lockfiles and posts the comment. Needs `contents: read` and `pull-requests: write`. |
 | `lockfiles` | all changed | Only check these lockfile paths (one per line). |
 | `max-lockfiles` | `3` | At most this many lockfile reports per workflow run. |
-| `assume-public-registry` | `false` | pnpm, Poetry, requirements files without an `--index-url` line and some npm lockfiles do not record where a package came from. Such entries are listed but not looked up unless you set this to `true`. Leave it off if you use a private registry or mirror. |
+| `assume-public-registry` | `false` | pnpm, Yarn 2 and later, bun, Poetry, requirements files without an `--index-url` line and some npm lockfiles do not record where a package came from. Such entries are listed but not looked up unless you set this to `true`. Leave it off if you use a private registry or mirror. |
 | `packages` | | Package mode instead: one update per line, e.g. `npm:axios@1.7.9..1.8.0` or `pypi:requests@2.31.0..2.32.0`. Works on any event. |
 | `fail-on` | `never` | Fail the step on `review` (red) or `notice` (yellow or red) verdicts. |
 | `comment` | `true` | Set `false` to write only the job summary. |
