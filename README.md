@@ -1,3 +1,5 @@
+<p><a href="https://cybernative.ai/"><img src="https://raw.githubusercontent.com/CyberNative-AI/upgrade-xray-action/main/assets/cybernative-cn-mark.svg" width="32" height="32" alt="" align="absmiddle"> CyberNative AI LLC</a></p>
+
 # Upgrade X-Ray for npm and PyPI dependency updates
 
 **In seconds, at $0.02 per package diff or $0.25 per lockfile report, see what a dependency update really changes in its published npm or PyPI files (new install scripts; new network, shell or eval calls; removed exports; new dependencies) without installing it.**
